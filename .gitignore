@@ -2,6 +2,11 @@
 .agents/
 .codex_*
 
+# Keep internal Markdown documents local; only README-family files are public.
+*.md
+!README*.md
+!**/README*.md
+
 # Python caches and virtual environments
 **/__pycache__/
 *.py[cod]
