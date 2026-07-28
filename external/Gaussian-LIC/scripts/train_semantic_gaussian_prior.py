@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Train the nuScenes -> R3LIVE Semantic Gaussian Prior pipeline.
-
-Each NPZ shard contains:
-  input:  float32 [N,24], exactly matching the C++ online decoder input
-  target: float32 [N,14], Gaussian residual teacher targets
-  weight: optional float32 [N]
-"""
+"""Train the nuScenes -> R3LIVE Semantic Gaussian Prior pipeline."""
 
 from __future__ import annotations
 
@@ -16,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from semantic_gaussian_prior_model import (
     INPUT_DIM,
@@ -31,13 +25,23 @@ class PriorShardDataset(Dataset):
         payload = json.loads(manifest.read_text(encoding="utf-8"))
         root = manifest.parent
         self.samples: list[tuple[Path, int]] = []
+        self.sample_sequence_ids: list[int] = []
+        self.sequence_names: list[str] = []
         self.cache: dict[Path, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        sequence_ids: dict[str, int] = {}
         for shard in payload["shards"]:
-            if shard["split"] != split or (source != "all" and shard["source"] != source):
+            if shard["split"] != split or (
+                source != "all" and shard["source"] != source
+            ):
                 continue
             path = root / shard["path"]
             count = int(shard["count"])
+            sequence = str(shard["sequence"])
+            sequence_id = sequence_ids.setdefault(sequence, len(sequence_ids))
+            if sequence_id == len(self.sequence_names):
+                self.sequence_names.append(sequence)
             self.samples.extend((path, index) for index in range(count))
+            self.sample_sequence_ids.extend([sequence_id] * count)
         if not self.samples:
             raise ValueError(f"no samples for split={split!r}, source={source!r}")
 
@@ -67,27 +71,149 @@ class PriorShardDataset(Dataset):
         inputs, targets, weights = self._load(path)
         return inputs[row], targets[row], weights[row]
 
+    def _unique_shards(self) -> list[tuple[Path, int, int]]:
+        shards: list[tuple[Path, int, int]] = []
+        start = 0
+        while start < len(self.samples):
+            path = self.samples[start][0]
+            end = start + 1
+            while end < len(self.samples) and self.samples[end][0] == path:
+                end += 1
+            shards.append((path, start, end))
+            start = end
+        return shards
+
+    def balanced_sampling_weights(
+        self,
+        semantic_fraction: float,
+        sequence_balanced: bool,
+    ) -> tuple[torch.Tensor, dict[str, object]]:
+        if not 0.0 <= semantic_fraction < 1.0:
+            raise ValueError("semantic_fraction must be in [0,1)")
+        semantic = np.zeros(len(self.samples), dtype=bool)
+        for path, start, end in self._unique_shards():
+            inputs, _, _ = self._load(path)
+            semantic[start:end] = (
+                (inputs[:, -1] > 0.0)
+                & (np.abs(inputs[:, 7:23]).sum(axis=1) > 0.0)
+            )
+
+        sequence_ids = np.asarray(self.sample_sequence_ids, dtype=np.int32)
+        sequence_values = np.unique(sequence_ids)
+        weights = np.zeros(len(self.samples), dtype=np.float64)
+        for sequence_id in sequence_values:
+            sequence_mask = sequence_ids == sequence_id
+            sequence_mass = (
+                1.0 / len(sequence_values)
+                if sequence_balanced
+                else float(sequence_mask.sum()) / len(self.samples)
+            )
+            semantic_mask = sequence_mask & semantic
+            nonsemantic_mask = sequence_mask & ~semantic
+            semantic_count = int(semantic_mask.sum())
+            nonsemantic_count = int(nonsemantic_mask.sum())
+            if semantic_fraction > 0.0 and semantic_count and nonsemantic_count:
+                weights[semantic_mask] = (
+                    sequence_mass * semantic_fraction / semantic_count
+                )
+                weights[nonsemantic_mask] = (
+                    sequence_mass * (1.0 - semantic_fraction) / nonsemantic_count
+                )
+            else:
+                weights[sequence_mask] = sequence_mass / int(sequence_mask.sum())
+        weights /= weights.sum()
+        summary = {
+            "rows": len(self.samples),
+            "sequences": {
+                self.sequence_names[int(sequence_id)]: {
+                    "rows": int((sequence_ids == sequence_id).sum()),
+                    "semantic_rows": int(
+                        ((sequence_ids == sequence_id) & semantic).sum()
+                    ),
+                }
+                for sequence_id in sequence_values
+            },
+            "natural_semantic_fraction": float(semantic.mean()),
+            "target_semantic_fraction": semantic_fraction,
+            "sequence_balanced": sequence_balanced,
+        }
+        return torch.from_numpy(weights), summary
+
 
 @torch.no_grad()
-def evaluate(model, loader, device) -> dict[str, float]:
+def evaluate(
+    model,
+    loader,
+    device,
+    loss_weights,
+    decoded_residual_targets,
+) -> dict[str, float]:
     model.eval()
-    totals: dict[str, float] = {"loss": 0.0}
-    count = 0
+    subsets = {
+        "": {"numerator": {}, "denominator": 0.0},
+        "semantic_": {"numerator": {}, "denominator": 0.0},
+        "nonsemantic_": {"numerator": {}, "denominator": 0.0},
+    }
     for features, target, weight in loader:
-        prediction = model(features.to(device))
-        loss, groups = prior_loss(prediction, target.to(device), weight.to(device))
-        batch = features.shape[0]
-        totals["loss"] += float(loss) * batch
-        for name, value in groups.items():
-            totals[name] = totals.get(name, 0.0) + float(value) * batch
-        count += batch
-    return {name: value / max(1, count) for name, value in totals.items()}
+        features_device = features.to(device)
+        target_device = target.to(device)
+        weight_device = weight.to(device)
+        prediction = model(features_device)
+        semantic_mask = (
+            (features_device[:, -1] > 0.0)
+            & (features_device[:, 7:23].abs().sum(dim=1) > 0.0)
+        )
+        masks = {
+            "": torch.ones_like(semantic_mask, dtype=torch.bool),
+            "semantic_": semantic_mask,
+            "nonsemantic_": ~semantic_mask,
+        }
+        for prefix, mask in masks.items():
+            if not mask.any():
+                continue
+            selected_weight = weight_device[mask]
+            denominator = float(selected_weight.sum())
+            if denominator <= 0.0:
+                continue
+            loss, groups = prior_loss(
+                prediction[mask],
+                target_device[mask],
+                selected_weight,
+                loss_weights,
+                decoded_residual_targets,
+            )
+            values = {"loss": loss.detach(), **groups}
+            subsets[prefix]["denominator"] += denominator
+            for name, value in values.items():
+                numerator = subsets[prefix]["numerator"]
+                numerator[name] = numerator.get(name, 0.0) + float(value) * denominator
+
+    result = {}
+    for prefix, subset in subsets.items():
+        denominator = max(1e-6, subset["denominator"])
+        for name, numerator in subset["numerator"].items():
+            result[f"{prefix}{name}"] = numerator / denominator
+        mean_key = f"{prefix}mean"
+        scale_key = f"{prefix}scale"
+        if mean_key in result and scale_key in result:
+            result[f"{prefix}geometry_loss"] = (
+                result[mean_key] + result[scale_key]
+            )
+    if "semantic_loss" in result and "nonsemantic_loss" in result:
+        result["balanced_loss"] = 0.5 * (
+            result["semantic_loss"] + result["nonsemantic_loss"]
+        )
+    return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--stage", choices=("nuscenes_pretrain", "r3live_distill"), required=True)
+    parser.add_argument(
+        "--stage",
+        choices=("nuscenes_pretrain", "r3live_distill"),
+        required=True,
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--init-checkpoint", type=Path)
     parser.add_argument("--hidden-dim", type=int, default=64)
@@ -98,7 +224,55 @@ def main() -> None:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=20260727)
+    parser.add_argument("--semantic-sample-fraction", type=float, default=0.0)
+    parser.add_argument("--sequence-balanced-sampling", action="store_true")
+    parser.add_argument("--freeze-backbone-blocks", type=int, default=0)
+    parser.add_argument("--backbone-learning-rate-scale", type=float, default=1.0)
+    parser.add_argument("--mean-loss-weight", type=float, default=1.0)
+    parser.add_argument("--scale-loss-weight", type=float, default=1.0)
+    parser.add_argument("--rotation-loss-weight", type=float, default=0.5)
+    parser.add_argument("--color-loss-weight", type=float, default=0.5)
+    parser.add_argument("--opacity-loss-weight", type=float, default=0.25)
+    parser.add_argument("--saturated-mean-threshold", type=float, default=0.0)
+    parser.add_argument("--saturated-mean-weight", type=float, default=1.0)
+    parser.add_argument("--decoded-residual-targets", action="store_true")
+    parser.add_argument(
+        "--selection-metric",
+        choices=(
+            "validation_loss",
+            "validation_balanced_loss",
+            "validation_semantic_loss",
+            "validation_geometry_loss",
+            "validation_semantic_geometry_loss",
+        ),
+        default="validation_loss",
+    )
     args = parser.parse_args()
+
+    if not 0.0 <= args.semantic_sample_fraction < 1.0:
+        raise ValueError("--semantic-sample-fraction must be in [0,1)")
+    if not 0.0 < args.backbone_learning_rate_scale <= 1.0:
+        raise ValueError("--backbone-learning-rate-scale must be in (0,1]")
+    if not 0.0 <= args.saturated_mean_weight <= 1.0:
+        raise ValueError("--saturated-mean-weight must be in [0,1]")
+    loss_weights = (
+        args.mean_loss_weight,
+        args.scale_loss_weight,
+        args.rotation_loss_weight,
+        args.color_loss_weight,
+        args.opacity_loss_weight,
+    )
+    if any(value < 0.0 for value in loss_weights):
+        raise ValueError("loss weights must be non-negative")
+    manifest_payload = json.loads(args.manifest.read_text(encoding="utf-8"))
+    target_contract = manifest_payload.get("r3live_target_contract")
+    if args.stage == "r3live_distill" and target_contract:
+        expected_decoded = target_contract["target_encoding"] == "decoded_v2"
+        if args.decoded_residual_targets != expected_decoded:
+            raise ValueError(
+                "--decoded-residual-targets does not match the manifest's "
+                f"{target_contract['target_encoding']!r} contract"
+            )
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -109,10 +283,25 @@ def main() -> None:
     source = "nuscenes" if args.stage == "nuscenes_pretrain" else "r3live_teacher"
     train_data = PriorShardDataset(args.manifest, "train", source)
     validation_data = PriorShardDataset(args.manifest, "validation", source)
+
+    sampler = None
+    sampling_summary = None
+    if args.semantic_sample_fraction > 0.0 or args.sequence_balanced_sampling:
+        sampling_weights, sampling_summary = train_data.balanced_sampling_weights(
+            args.semantic_sample_fraction,
+            args.sequence_balanced_sampling,
+        )
+        sampler = WeightedRandomSampler(
+            sampling_weights,
+            num_samples=len(train_data),
+            replacement=True,
+            generator=torch.Generator().manual_seed(args.seed),
+        )
     train_loader = DataLoader(
         train_data,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         num_workers=args.workers,
         pin_memory=device.type == "cuda",
         drop_last=False,
@@ -129,38 +318,100 @@ def main() -> None:
     if args.init_checkpoint:
         checkpoint = torch.load(args.init_checkpoint, map_location="cpu")
         model.load_state_dict(checkpoint["model"])
+    backbone_blocks = args.layers - 1
+    if not 0 <= args.freeze_backbone_blocks <= backbone_blocks:
+        raise ValueError(
+            f"--freeze-backbone-blocks must be in [0,{backbone_blocks}]"
+        )
+    backbone_modules = list(model.backbone.children())
+    for module in backbone_modules[: 3 * args.freeze_backbone_blocks]:
+        for parameter in module.parameters():
+            parameter.requires_grad_(False)
+    backbone_parameters = [
+        parameter for parameter in model.backbone.parameters() if parameter.requires_grad
+    ]
+    parameter_groups = [{"params": model.output.parameters(), "lr": args.learning_rate}]
+    if backbone_parameters:
+        parameter_groups.insert(
+            0,
+            {
+                "params": backbone_parameters,
+                "lr": args.learning_rate * args.backbone_learning_rate_scale,
+            },
+        )
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
+        parameter_groups,
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(1, args.epochs)
+        optimizer,
+        T_max=max(1, args.epochs),
     )
+
     args.output.mkdir(parents=True, exist_ok=True)
+    run_config = {
+        **vars(args),
+        "manifest": str(args.manifest),
+        "output": str(args.output),
+        "init_checkpoint": str(args.init_checkpoint) if args.init_checkpoint else None,
+        "loss_weights": loss_weights,
+        "sampling": sampling_summary,
+        "target_contract": target_contract,
+    }
+    (args.output / "run_config.json").write_text(
+        json.dumps(run_config, indent=2),
+        encoding="utf-8",
+    )
+
     history = []
     best_loss = float("inf")
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_total = 0.0
-        train_count = 0
+        train_denominator = 0.0
         for features, target, weight in train_loader:
             optimizer.zero_grad(set_to_none=True)
             prediction = model(features.to(device, non_blocking=True))
+            training_weight = weight.to(device, non_blocking=True)
+            if args.saturated_mean_threshold > 0.0:
+                saturated = (
+                    target[:, 0:3].abs().amax(dim=1)
+                    >= args.saturated_mean_threshold
+                ).to(device, non_blocking=True)
+                training_weight = training_weight * torch.where(
+                    saturated,
+                    torch.full_like(training_weight, args.saturated_mean_weight),
+                    torch.ones_like(training_weight),
+                )
             loss, _ = prior_loss(
                 prediction,
                 target.to(device, non_blocking=True),
-                weight.to(device, non_blocking=True),
+                training_weight,
+                loss_weights,
+                args.decoded_residual_targets,
             )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
-            train_total += float(loss.detach()) * features.shape[0]
-            train_count += features.shape[0]
+            batch_weight = float(training_weight.sum())
+            train_total += float(loss.detach()) * batch_weight
+            train_denominator += batch_weight
         scheduler.step()
-        metrics = evaluate(model, validation_loader, device)
+        metrics = evaluate(
+            model,
+            validation_loader,
+            device,
+            loss_weights,
+            args.decoded_residual_targets,
+        )
         row = {
             "epoch": epoch,
-            "train_loss": train_total / max(1, train_count),
-            "learning_rate": optimizer.param_groups[0]["lr"],
+            "train_loss": train_total / max(1e-6, train_denominator),
+            "learning_rate": optimizer.param_groups[-1]["lr"],
+            "backbone_learning_rate": (
+                optimizer.param_groups[0]["lr"] if backbone_parameters else 0.0
+            ),
             **{f"validation_{key}": value for key, value in metrics.items()},
         }
         history.append(row)
@@ -172,17 +423,23 @@ def main() -> None:
             "stage": args.stage,
             "epoch": epoch,
             "metrics": row,
+            "run_config": run_config,
         }
         torch.save(checkpoint, args.output / "last.pt")
-        if metrics["loss"] < best_loss:
-            best_loss = metrics["loss"]
+        selection_value = row.get(args.selection_metric)
+        if selection_value is None:
+            raise RuntimeError(
+                f"selection metric {args.selection_metric!r} was not produced"
+            )
+        if selection_value < best_loss:
+            best_loss = selection_value
             torch.save(checkpoint, args.output / "best.pt")
 
     (args.output / "history.json").write_text(
-        json.dumps(history, indent=2), encoding="utf-8"
+        json.dumps(history, indent=2),
+        encoding="utf-8",
     )
 
 
 if __name__ == "__main__":
     main()
-

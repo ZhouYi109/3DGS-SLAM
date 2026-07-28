@@ -226,6 +226,10 @@ stdbuf -oL -eL "/root/autodl-tmp/catkin_gaussian/devel/lib/gaussian_lic/gs_mappi
     _semantic_feature_delta_required:="${semantic_feature_delta_required}" \
     _semantic_gaussian_prior_model_path:="${SEMANTIC_GAUSSIAN_PRIOR_MODEL:-/root/autodl-fs/models/semantic_gaussian_prior/r3live_distilled.ts}" \
     _semantic_gaussian_prior_strategy:="${prior_strategy}" \
+    _semantic_gaussian_prior_mean_offset_limit:="${SEMANTIC_GAUSSIAN_PRIOR_MEAN_OFFSET_LIMIT:-1.0}" \
+    _semantic_gaussian_prior_log_scale_limit:="${SEMANTIC_GAUSSIAN_PRIOR_LOG_SCALE_LIMIT:-1.0}" \
+    _semantic_gaussian_prior_color_residual_limit:="${SEMANTIC_GAUSSIAN_PRIOR_COLOR_RESIDUAL_LIMIT:-0.25}" \
+    _semantic_gaussian_prior_opacity_logit_limit:="${SEMANTIC_GAUSSIAN_PRIOR_OPACITY_LOGIT_LIMIT:-2.0}" \
     _residual_optimization_iters:="${residual_optimization_iters}" \
     _evaluation_save_images:="${EVALUATION_SAVE_IMAGES:-true}" \
     "${prior_override_remap[@]}" \

@@ -31,7 +31,15 @@ def main() -> None:
     parser.add_argument("--split", choices=("train", "validation", "test"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--shard-size", type=int, default=65536)
+    parser.add_argument("--mean-offset-limit", type=float, default=1.0)
+    parser.add_argument(
+        "--target-encoding",
+        choices=("preactivation_v1", "decoded_v2"),
+        default="preactivation_v1",
+    )
     args = parser.parse_args()
+    if args.mean_offset_limit <= 0.0:
+        raise ValueError("--mean-offset-limit must be positive")
 
     sidecar = args.result / "teacher_distillation"
     inputs_all = np.load(sidecar / "candidate_input.npy")
@@ -64,11 +72,19 @@ def main() -> None:
     base_rgb = inputs[:, 3:6]
     linear_scale = np.exp(base_scaling[:, 0:1]).clip(1e-6)
     target = np.zeros((len(inputs), 14), dtype=np.float32)
-    target[:, 0:3] = inverse_tanh((final_xyz - base_xyz) / linear_scale)
+    mean_residual = (
+        (final_xyz - base_xyz) / (args.mean_offset_limit * linear_scale)
+    )
+    color_residual = (final_rgb - base_rgb) / 0.25
+    if args.target_encoding == "decoded_v2":
+        target[:, 0:3] = np.clip(mean_residual, -0.999, 0.999)
+        target[:, 10:13] = np.clip(color_residual, -0.999, 0.999)
+    else:
+        target[:, 0:3] = inverse_tanh(mean_residual)
+        target[:, 10:13] = inverse_tanh(color_residual)
     target[:, 3:6] = np.clip(final_scaling - base_scaling, -1.0, 1.0)
     rotation_norm = np.linalg.norm(final_rotation, axis=1, keepdims=True).clip(1e-6)
     target[:, 6:10] = final_rotation / rotation_norm
-    target[:, 10:13] = inverse_tanh((final_rgb - base_rgb) / 0.25)
     target[:, 13:14] = np.clip(final_opacity - base_opacity, -2.0, 2.0)
     confidence = np.clip(inputs[:, -1], 0.1, 1.0)
     visibility = 1.0 / (1.0 + np.exp(-final_opacity[:, 0]))
@@ -93,6 +109,8 @@ def main() -> None:
             source=np.array("r3live_teacher"),
             sequence=np.array(args.sequence),
             split=np.array(args.split),
+            target_encoding=np.array(args.target_encoding),
+            mean_offset_limit=np.array(args.mean_offset_limit, dtype=np.float32),
         )
         shards.append({"path": path.name, "count": end - start})
     summary = {
@@ -101,6 +119,8 @@ def main() -> None:
         "final_gaussians": len(vertex),
         "paired_gaussians": int(len(inputs)),
         "pair_rate": float(len(inputs) / max(1, len(vertex))),
+        "target_encoding": args.target_encoding,
+        "mean_offset_limit": args.mean_offset_limit,
         "shards": shards,
     }
     (args.output / f"{args.sequence}_summary.json").write_text(
@@ -111,4 +131,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

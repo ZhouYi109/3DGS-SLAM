@@ -43,6 +43,7 @@ def main() -> None:
         "output_dim": OUTPUT_DIM,
         "stage": checkpoint.get("stage", "unknown"),
         "metrics": checkpoint.get("metrics", {}),
+        "run_config": checkpoint.get("run_config", {}),
         "decoder": ["mean_xyz", "log_scale", "quaternion", "rgb", "opacity_logit"],
     }
     args.output.with_suffix(".json").write_text(
@@ -53,4 +54,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

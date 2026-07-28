@@ -19,6 +19,7 @@
 #include "mapping.h"
 #include "gaussian.h"
 
+#include <array>
 #include <atomic>
 #include <thread>
 #include <condition_variable>
@@ -810,6 +811,21 @@ int main(int argc, char** argv)
         semantic_gaussian_prior_strategy);
     config_node["semantic_gaussian_prior_strategy"] =
         semantic_gaussian_prior_strategy;
+    const std::array<std::string, 4> prior_limit_keys = {
+        "semantic_gaussian_prior_mean_offset_limit",
+        "semantic_gaussian_prior_log_scale_limit",
+        "semantic_gaussian_prior_color_residual_limit",
+        "semantic_gaussian_prior_opacity_logit_limit",
+    };
+    const std::array<double, 4> prior_limit_defaults = {1.0, 1.0, 0.25, 2.0};
+    for (std::size_t index = 0; index < prior_limit_keys.size(); ++index)
+    {
+        const auto& key = prior_limit_keys[index];
+        double value = config_node[key]
+            ? config_node[key].as<double>() : prior_limit_defaults[index];
+        nh.param<double>(key, value, value);
+        config_node[key] = value;
+    }
     int residual_optimization_iters = config_node["residual_optimization_iters"]
         ? config_node["residual_optimization_iters"].as<int>() : 100;
     nh.param<int>(

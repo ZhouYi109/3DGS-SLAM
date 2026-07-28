@@ -28,7 +28,24 @@ class SemanticGaussianPriorTest(unittest.TestCase):
         self.assertEqual(set(groups), {"mean", "scale", "rotation", "color", "opacity"})
         self.assertIsNotNone(model.output.weight.grad)
 
+    def test_decoded_targets_compare_bounded_residuals(self):
+        prediction = torch.zeros(4, 14)
+        prediction[:, 0] = torch.tensor([-2.0, -0.5, 0.5, 2.0])
+        prediction[:, 10] = prediction[:, 0]
+        target = torch.zeros_like(prediction)
+        target[:, 0] = torch.tanh(prediction[:, 0])
+        target[:, 10] = torch.tanh(prediction[:, 10])
+        target[:, 6] = 1.0
+        loss, groups = prior_loss(
+            prediction,
+            target,
+            torch.ones(4),
+            decoded_residual_targets=True,
+        )
+        self.assertAlmostEqual(float(groups["mean"]), 0.0, places=7)
+        self.assertAlmostEqual(float(groups["color"]), 0.0, places=7)
+        self.assertAlmostEqual(float(loss), 0.0, places=7)
+
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -19,6 +19,12 @@ def scalar_text(data, key: str) -> str:
     return str(np.asarray(data[key]).reshape(-1)[0])
 
 
+def optional_scalar(data, key: str, default):
+    if key not in data:
+        return default
+    return np.asarray(data[key]).reshape(-1)[0].item()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--shard-root", type=Path, required=True)
@@ -67,22 +73,47 @@ def main() -> None:
                 )
         else:
             split = embedded_split
-        shards.append(
-            {
-                "path": os.path.relpath(path, args.output.parent),
-                "count": int(inputs.shape[0]),
-                "source": source,
-                "sequence": sequence,
-                "split": split,
-            }
-        )
+        shard = {
+            "path": os.path.relpath(path, args.output.parent),
+            "count": int(inputs.shape[0]),
+            "source": source,
+            "sequence": sequence,
+            "split": split,
+        }
+        if source == "r3live_teacher":
+            shard["target_encoding"] = optional_scalar(
+                data,
+                "target_encoding",
+                "preactivation_v1",
+            )
+            shard["mean_offset_limit"] = float(
+                optional_scalar(data, "mean_offset_limit", 1.0)
+            )
+        shards.append(shard)
     if not shards:
         raise RuntimeError("no NPZ shards found")
+    r3live_contracts = {
+        (shard["target_encoding"], shard["mean_offset_limit"])
+        for shard in shards
+        if shard["source"] == "r3live_teacher"
+    }
+    if len(r3live_contracts) > 1:
+        raise ValueError(
+            f"inconsistent R3LIVE target contracts: {sorted(r3live_contracts)}"
+        )
     payload = {
         "format": "semantic-gaussian-prior-v1",
         "input_dim": INPUT_DIM,
         "output_dim": OUTPUT_DIM,
         "fold": args.fold_name,
+        "r3live_target_contract": (
+            {
+                "target_encoding": next(iter(r3live_contracts))[0],
+                "mean_offset_limit": next(iter(r3live_contracts))[1],
+            }
+            if r3live_contracts
+            else None
+        ),
         "shards": shards,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -49,6 +49,14 @@ def prior_loss(
     prediction: torch.Tensor,
     target: torch.Tensor,
     sample_weight: torch.Tensor,
+    group_weights: tuple[float, float, float, float, float] = (
+        1.0,
+        1.0,
+        0.5,
+        0.5,
+        0.25,
+    ),
+    decoded_residual_targets: bool = False,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Group-balanced distillation loss for (mu, scale, q, RGB, opacity)."""
 
@@ -61,16 +69,37 @@ def prior_loss(
         per_sample = values.reshape(values.shape[0], -1).mean(dim=1)
         return (per_sample * weight).sum() / denominator
 
-    mean = reduce(F.smooth_l1_loss(prediction[:, 0:3], target[:, 0:3], reduction="none"))
+    bounded_prediction = torch.tanh(prediction) if decoded_residual_targets else prediction
+    mean = reduce(
+        F.smooth_l1_loss(
+            bounded_prediction[:, 0:3],
+            target[:, 0:3],
+            reduction="none",
+        )
+    )
     scale = reduce(F.smooth_l1_loss(prediction[:, 3:6], target[:, 3:6], reduction="none"))
     pred_q = prediction[:, 6:10].clone()
     pred_q[:, 0] = pred_q[:, 0] + 1.0
     pred_q = F.normalize(pred_q, dim=1)
     target_q = F.normalize(target[:, 6:10], dim=1)
     rotation = reduce(1.0 - torch.abs((pred_q * target_q).sum(dim=1)))
-    color = reduce(F.smooth_l1_loss(prediction[:, 10:13], target[:, 10:13], reduction="none"))
+    color = reduce(
+        F.smooth_l1_loss(
+            bounded_prediction[:, 10:13],
+            target[:, 10:13],
+            reduction="none",
+        )
+    )
     opacity = reduce(F.smooth_l1_loss(prediction[:, 13:14], target[:, 13:14], reduction="none"))
-    total = mean + scale + 0.5 * rotation + 0.5 * color + 0.25 * opacity
+    if len(group_weights) != 5 or any(value < 0.0 for value in group_weights):
+        raise ValueError("group_weights must contain five non-negative values")
+    total = (
+        group_weights[0] * mean
+        + group_weights[1] * scale
+        + group_weights[2] * rotation
+        + group_weights[3] * color
+        + group_weights[4] * opacity
+    )
     return total, {
         "mean": mean.detach(),
         "scale": scale.detach(),

@@ -11,6 +11,12 @@ run_id="${1:-gaussian_replay_$(date +%Y%m%d_%H%M%S)}"
 backend_ablation_mode="${2:-all_dynamic}"
 input_bag="${3:-/autodl-fs/data/remote_code_frozen/frozen_fast_backend_contract_002.bag}"
 random_seed="${4:-20260725}"
+residual_optimization_iters="${PRIOR_RESIDUAL_OPTIMIZATION_ITERS:-100}"
+prior_enabled="${SEMANTIC_GAUSSIAN_PRIOR_ENABLED:-false}"
+prior_model="${SEMANTIC_GAUSSIAN_PRIOR_MODEL:-}"
+prior_strategy="${SEMANTIC_GAUSSIAN_PRIOR_STRATEGY:-full}"
+prior_mean_offset_limit="${SEMANTIC_GAUSSIAN_PRIOR_MEAN_OFFSET_LIMIT:-1.0}"
+evaluation_save_images="${EVALUATION_SAVE_IMAGES:-true}"
 gaussian_root="/root/autodl-tmp/catkin_gaussian/src/Gaussian-LIC"
 config_path="${gaussian_root}/config/r3live_paper.yaml"
 result_root="/autodl-fs/data/remote_code_frozen/gaussian_ablation_20260725"
@@ -49,6 +55,10 @@ if [ ! -f "${input_bag}" ]; then
     echo "Frozen input bag does not exist: ${input_bag}" >&2
     exit 2
 fi
+if [ "${prior_enabled}" = "true" ] && [ ! -f "${prior_model}" ]; then
+    echo "Semantic Gaussian Prior model does not exist: ${prior_model}" >&2
+    exit 2
+fi
 
 roscore_pid=""
 gaussian_pid=""
@@ -79,6 +89,12 @@ stdbuf -oL -eL "${gaussian_root}/../../devel/lib/gaussian_lic/gs_mapping" \
     _dynamic_appearance_weight:="${dynamic_appearance_weight}" \
     _dynamic_geometry_capacity:="${dynamic_geometry_capacity}" \
     _random_seed:="${random_seed}" \
+    _semantic_gaussian_prior_enabled:="${prior_enabled}" \
+    _semantic_gaussian_prior_model_path:="${prior_model}" \
+    _semantic_gaussian_prior_strategy:="${prior_strategy}" \
+    _semantic_gaussian_prior_mean_offset_limit:="${prior_mean_offset_limit}" \
+    _residual_optimization_iters:="${residual_optimization_iters}" \
+    _evaluation_save_images:="${evaluation_save_images}" \
     >"${log_dir}/gaussian.log" 2>&1 &
 gaussian_pid=$!
 
@@ -140,6 +156,12 @@ dynamic_appearance_weight=${dynamic_appearance_weight}
 dynamic_geometry_capacity=${dynamic_geometry_capacity}
 random_seed=${random_seed}
 input_bag=${input_bag}
+residual_optimization_iters=${residual_optimization_iters}
+semantic_gaussian_prior_enabled=${prior_enabled}
+semantic_gaussian_prior_model_path=${prior_model}
+semantic_gaussian_prior_strategy=${prior_strategy}
+semantic_gaussian_prior_mean_offset_limit=${prior_mean_offset_limit}
+evaluation_save_images=${evaluation_save_images}
 EOF
 
 find "${result_dir}" -maxdepth 3 -type f | sort >"${result_dir}/file_manifest.txt"
@@ -154,3 +176,6 @@ echo "BACKEND_ABLATION_MODE=${backend_ablation_mode}"
 echo "DYNAMIC_APPEARANCE_WEIGHT=${dynamic_appearance_weight}"
 echo "DYNAMIC_GEOMETRY_CAPACITY=${dynamic_geometry_capacity}"
 echo "RANDOM_SEED=${random_seed}"
+echo "RESIDUAL_OPTIMIZATION_ITERS=${residual_optimization_iters}"
+echo "SEMANTIC_GAUSSIAN_PRIOR_ENABLED=${prior_enabled}"
+echo "SEMANTIC_GAUSSIAN_PRIOR_STRATEGY=${prior_strategy}"
