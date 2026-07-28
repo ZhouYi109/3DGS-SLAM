@@ -583,6 +583,11 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     std::cout << "\n     🎉 Runtime Statistics 🎉\n";
     std::cout << std::fixed << std::setprecision(2) << "\n        [Total Mapping Time] " << total_mapping_time << "s" << std::endl;
     std::cout << std::fixed << std::setprecision(2) << "         1) Forward " << gaussians->t_forward_ << "s" << std::endl;
+    std::cout << std::fixed << std::setprecision(6)
+              << "         1a) Prior Forward "
+              << gaussians->t_prior_forward_ << "s, calls="
+              << gaussians->prior_forward_calls_ << ", candidates="
+              << gaussians->prior_forward_candidates_ << std::endl;
     std::cout << std::fixed << std::setprecision(2) << "         2) Backward " << gaussians->t_backward_ << "s" << std::endl;
     std::cout << std::fixed << std::setprecision(2) << "         3) Step " << gaussians->t_step_ << "s" << std::endl;
     std::cout << std::fixed << std::setprecision(2) << "         4) CPU2GPU " << gaussians->t_tocuda_ << "s" << std::endl;
@@ -603,6 +608,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
                   << prm.semantic_wait_timeout_sec << std::endl;
     }
     torch::NoGradGuard no_grad;
+    const auto evaluation_start = std::chrono::steady_clock::now();
     try
     {
         evaluateVisualQuality(dataset, gaussians, result_path, lpips_path);
@@ -615,6 +621,16 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     {
         std::cerr << "[Gaussian-LIC] evaluateVisualQuality failed: " << e.what() << std::endl;
     }
+    torch::cuda::synchronize();
+    const auto evaluation_end = std::chrono::steady_clock::now();
+    const double evaluation_time =
+        std::chrono::duration_cast<std::chrono::duration<double>>(
+            evaluation_end - evaluation_start).count();
+    std::cout << std::fixed << std::setprecision(2)
+              << "        [Total Evaluation Time] " << evaluation_time
+              << "s, save_images="
+              << (gaussians->evaluation_save_images_ ? "true" : "false")
+              << std::endl;
 
     try
     {
@@ -784,6 +800,16 @@ int main(int argc, char** argv)
         semantic_gaussian_prior_model_path);
     config_node["semantic_gaussian_prior_model_path"] =
         semantic_gaussian_prior_model_path;
+    std::string semantic_gaussian_prior_strategy =
+        config_node["semantic_gaussian_prior_strategy"]
+            ? config_node["semantic_gaussian_prior_strategy"].as<std::string>()
+            : "full";
+    nh.param<std::string>(
+        "semantic_gaussian_prior_strategy",
+        semantic_gaussian_prior_strategy,
+        semantic_gaussian_prior_strategy);
+    config_node["semantic_gaussian_prior_strategy"] =
+        semantic_gaussian_prior_strategy;
     int residual_optimization_iters = config_node["residual_optimization_iters"]
         ? config_node["residual_optimization_iters"].as<int>() : 100;
     nh.param<int>(
@@ -791,6 +817,13 @@ int main(int argc, char** argv)
         residual_optimization_iters,
         residual_optimization_iters);
     config_node["residual_optimization_iters"] = residual_optimization_iters;
+    bool evaluation_save_images = config_node["evaluation_save_images"]
+        ? config_node["evaluation_save_images"].as<bool>() : true;
+    nh.param<bool>(
+        "evaluation_save_images",
+        evaluation_save_images,
+        evaluation_save_images);
+    config_node["evaluation_save_images"] = evaluation_save_images;
     bool teacher_distillation_export_enabled =
         config_node["teacher_distillation_export_enabled"]
             ? config_node["teacher_distillation_export_enabled"].as<bool>() : false;
@@ -852,8 +885,12 @@ int main(int argc, char** argv)
               << (semantic_gaussian_prior_enabled ? "true" : "false")
               << ", semantic_gaussian_prior_model_path="
               << semantic_gaussian_prior_model_path
+              << ", semantic_gaussian_prior_strategy="
+              << semantic_gaussian_prior_strategy
               << ", residual_optimization_iters="
               << residual_optimization_iters
+              << ", evaluation_save_images="
+              << (evaluation_save_images ? "true" : "false")
               << ", teacher_distillation_export_enabled="
               << (teacher_distillation_export_enabled ? "true" : "false")
               << ", semantic_storage_growth_rows=" << semantic_storage_growth_rows

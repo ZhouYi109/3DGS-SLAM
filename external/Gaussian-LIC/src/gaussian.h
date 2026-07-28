@@ -253,6 +253,7 @@ public:
     bool dynamic_geometry_capacity_;
     int random_seed_;
     int residual_optimization_iters_;
+    bool evaluation_save_images_;
     std::mt19937 random_generator_;
 
     bool apply_exposure_;
@@ -312,6 +313,7 @@ public:
     std::string semantic_bundle_path_;
     bool semantic_gaussian_prior_enabled_;
     std::string semantic_gaussian_prior_model_path_;
+    std::string semantic_gaussian_prior_strategy_;
     float semantic_gaussian_prior_mean_offset_limit_;
     float semantic_gaussian_prior_log_scale_limit_;
     float semantic_gaussian_prior_color_residual_limit_;
@@ -329,10 +331,13 @@ public:
     std::chrono::steady_clock::time_point t_start_;
     std::chrono::steady_clock::time_point t_end_;
     double t_forward_;
+    double t_prior_forward_;
     double t_backward_;
     double t_step_;
     double t_optlist_;
     double t_tocuda_;
+    int64_t prior_forward_calls_;
+    int64_t prior_forward_candidates_;
 };
 
 void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianModel>& pc);

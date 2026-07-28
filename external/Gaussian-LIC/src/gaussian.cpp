@@ -1319,7 +1319,8 @@ GaussianModel::GaussianModel(const Params& prm)
     dynamic_geometry_capacity_ = prm.dynamic_geometry_capacity;
     random_seed_ = prm.random_seed;
     residual_optimization_iters_ =
-        std::max(1, prm.residual_optimization_iters);
+        std::max(0, prm.residual_optimization_iters);
+    evaluation_save_images_ = prm.evaluation_save_images;
     teacher_distillation_export_enabled_ =
         prm.teacher_distillation_export_enabled;
     next_teacher_candidate_id_ = 0;
@@ -1336,6 +1337,16 @@ GaussianModel::GaussianModel(const Params& prm)
     semantic_gaussian_prior_enabled_ = prm.semantic_gaussian_prior_enabled;
     semantic_gaussian_prior_model_path_ =
         prm.semantic_gaussian_prior_model_path;
+    semantic_gaussian_prior_strategy_ =
+        prm.semantic_gaussian_prior_strategy;
+    if (semantic_gaussian_prior_strategy_ != "full" &&
+        semantic_gaussian_prior_strategy_ != "geometry_only" &&
+        semantic_gaussian_prior_strategy_ != "appearance_only")
+    {
+        throw std::runtime_error(
+            "Unsupported semantic Gaussian prior strategy: " +
+            semantic_gaussian_prior_strategy_);
+    }
     semantic_gaussian_prior_mean_offset_limit_ = static_cast<float>(
         std::max(0.0, prm.semantic_gaussian_prior_mean_offset_limit));
     semantic_gaussian_prior_log_scale_limit_ = static_cast<float>(
@@ -1360,6 +1371,7 @@ GaussianModel::GaussianModel(const Params& prm)
         semantic_gaussian_prior_model_->eval();
         std::cout << "[Semantic Gaussian Prior] loaded "
                   << semantic_gaussian_prior_model_path_
+                  << ", strategy=" << semantic_gaussian_prior_strategy_
                   << ", residual_optimization_iters="
                   << residual_optimization_iters_ << std::endl;
     }
@@ -1410,10 +1422,13 @@ GaussianModel::GaussianModel(const Params& prm)
     semantic_memory_revision_ = -1;
 
     t_forward_ = 0;
+    t_prior_forward_ = 0;
     t_backward_ = 0;
     t_step_ = 0;
     t_optlist_ = 0;
     t_tocuda_ = 0;
+    prior_forward_calls_ = 0;
+    prior_forward_candidates_ = 0;
 }
 
 bool GaussianModel::applySemanticGaussianPrior(
@@ -1433,22 +1448,31 @@ bool GaussianModel::applySemanticGaussianPrior(
     {
         return false;
     }
-    if (!object_latent.defined() || object_latent.dim() != 2 ||
-        object_latent.size(0) != base_xyz.size(0) ||
-        object_latent.size(1) <= 0 ||
-        !confidence.defined() || confidence.dim() != 1 ||
-        confidence.size(0) != base_xyz.size(0))
-    {
-        return false;
-    }
-
     torch::NoGradGuard no_grad;
+    torch::Tensor effective_latent = object_latent;
+    torch::Tensor effective_confidence = confidence;
+    if (!effective_latent.defined() || effective_latent.dim() != 2 ||
+        effective_latent.size(0) != base_xyz.size(0) ||
+        effective_latent.size(1) != 16)
+    {
+        effective_latent = torch::zeros(
+            {base_xyz.size(0), 16},
+            torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
+    }
+    if (!effective_confidence.defined() || effective_confidence.dim() != 1 ||
+        effective_confidence.size(0) != base_xyz.size(0))
+    {
+        effective_confidence = torch::zeros(
+            {base_xyz.size(0)},
+            torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
+    }
+    const auto prior_start = std::chrono::steady_clock::now();
     auto xyz_input = torch::tanh(base_xyz.detach() / 50.0f);
     auto rgb_input = base_rgb.detach().clamp(0.0f, 1.0f);
     auto depth_input = torch::log1p(depth.detach().clamp_min(0.0f)).unsqueeze(1);
-    auto latent_input = object_latent.detach()
+    auto latent_input = effective_latent.detach()
         .to(torch::kCUDA).to(torch::kFloat32);
-    auto confidence_input = confidence.detach()
+    auto confidence_input = effective_confidence.detach()
         .to(torch::kCUDA).to(torch::kFloat32).clamp(0.0f, 1.0f).unsqueeze(1);
     auto input = torch::cat(
         {xyz_input, rgb_input, depth_input, latent_input, confidence_input}, 1);
@@ -1461,45 +1485,57 @@ bool GaussianModel::applySemanticGaussianPrior(
     }
     output = torch::nan_to_num(
         output.to(torch::kCUDA).to(torch::kFloat32), 0.0, 0.0, 0.0);
+    torch::cuda::synchronize();
+    t_prior_forward_ +=
+        std::chrono::duration_cast<std::chrono::duration<double>>(
+            std::chrono::steady_clock::now() - prior_start).count();
+    ++prior_forward_calls_;
+    prior_forward_candidates_ += base_xyz.size(0);
 
-    auto base_linear_scale =
-        (scaling_scale_ * depth.detach().clamp_min(1e-4f) / focal)
-            .unsqueeze(1);
-    auto mean_delta = torch::tanh(output.index({
-        torch::indexing::Slice(), torch::indexing::Slice(0, 3)}));
-    prior_xyz = base_xyz + semantic_gaussian_prior_mean_offset_limit_ *
-        base_linear_scale * mean_delta;
+    if (semantic_gaussian_prior_strategy_ != "appearance_only")
+    {
+        auto base_linear_scale =
+            (scaling_scale_ * depth.detach().clamp_min(1e-4f) / focal)
+                .unsqueeze(1);
+        auto mean_delta = torch::tanh(output.index({
+            torch::indexing::Slice(), torch::indexing::Slice(0, 3)}));
+        prior_xyz = base_xyz + semantic_gaussian_prior_mean_offset_limit_ *
+            base_linear_scale * mean_delta;
 
-    auto log_scale_delta = output.index({
-        torch::indexing::Slice(), torch::indexing::Slice(3, 6)})
-        .clamp(
-            -semantic_gaussian_prior_log_scale_limit_,
-            semantic_gaussian_prior_log_scale_limit_);
-    prior_scaling = prior_scaling + log_scale_delta;
+        auto log_scale_delta = output.index({
+            torch::indexing::Slice(), torch::indexing::Slice(3, 6)})
+            .clamp(
+                -semantic_gaussian_prior_log_scale_limit_,
+                semantic_gaussian_prior_log_scale_limit_);
+        prior_scaling = prior_scaling + log_scale_delta;
 
-    auto rotation_residual = output.index({
-        torch::indexing::Slice(), torch::indexing::Slice(6, 10)}).clone();
-    rotation_residual.index_put_(
-        {torch::indexing::Slice(), 0},
-        rotation_residual.index({torch::indexing::Slice(), 0}) + 1.0f);
-    prior_rotation = torch::nn::functional::normalize(
-        rotation_residual,
-        torch::nn::functional::NormalizeFuncOptions().p(2.0).dim(1));
+        auto rotation_residual = output.index({
+            torch::indexing::Slice(), torch::indexing::Slice(6, 10)}).clone();
+        rotation_residual.index_put_(
+            {torch::indexing::Slice(), 0},
+            rotation_residual.index({torch::indexing::Slice(), 0}) + 1.0f);
+        prior_rotation = torch::nn::functional::normalize(
+            rotation_residual,
+            torch::nn::functional::NormalizeFuncOptions().p(2.0).dim(1));
+    }
 
-    auto color_delta = torch::tanh(output.index({
-        torch::indexing::Slice(), torch::indexing::Slice(10, 13)}));
-    auto prior_rgb = (
-        base_rgb + semantic_gaussian_prior_color_residual_limit_ * color_delta)
-        .clamp(0.0f, 1.0f);
-    auto prior_sh = RGB2SH(prior_rgb);
-    prior_features_dc = prior_sh.unsqueeze(1).contiguous();
+    if (semantic_gaussian_prior_strategy_ != "geometry_only")
+    {
+        auto color_delta = torch::tanh(output.index({
+            torch::indexing::Slice(), torch::indexing::Slice(10, 13)}));
+        auto prior_rgb = (
+            base_rgb + semantic_gaussian_prior_color_residual_limit_ * color_delta)
+            .clamp(0.0f, 1.0f);
+        auto prior_sh = RGB2SH(prior_rgb);
+        prior_features_dc = prior_sh.unsqueeze(1).contiguous();
 
-    auto opacity_delta = output.index({
-        torch::indexing::Slice(), torch::indexing::Slice(13, 14)})
-        .clamp(
-            -semantic_gaussian_prior_opacity_logit_limit_,
-            semantic_gaussian_prior_opacity_logit_limit_);
-    prior_opacity = prior_opacity + opacity_delta;
+        auto opacity_delta = output.index({
+            torch::indexing::Slice(), torch::indexing::Slice(13, 14)})
+            .clamp(
+                -semantic_gaussian_prior_opacity_logit_limit_,
+                semantic_gaussian_prior_opacity_logit_limit_);
+        prior_opacity = prior_opacity + opacity_delta;
+    }
     return true;
 }
 
@@ -2065,30 +2101,30 @@ void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
         ).clone();
         initial_object_latent = object_latent;
         initial_confidence = confidence;
-        auto prior_features_dc = features.index({
-            torch::indexing::Slice(),
-            torch::indexing::Slice(),
-            torch::indexing::Slice(0, 1)}).transpose(1, 2).contiguous();
-        if (applySemanticGaussianPrior(
-                fused_point_cloud,
-                base_rgb,
-                foreground_depth,
-                static_cast<float>(f),
-                object_latent,
-                confidence,
-                fused_point_cloud,
-                prior_features_dc,
-                scales,
-                rots,
-                opacities))
-        {
-            features.index_put_(
-                {torch::indexing::Slice(), torch::indexing::Slice(),
-                 0},
-                prior_features_dc.squeeze(1));
-            std::cout << "[Semantic Gaussian Prior] initialized "
-                      << num << " foreground candidates" << std::endl;
-        }
+    }
+    auto prior_features_dc = features.index({
+        torch::indexing::Slice(),
+        torch::indexing::Slice(),
+        torch::indexing::Slice(0, 1)}).transpose(1, 2).contiguous();
+    if (applySemanticGaussianPrior(
+            fused_point_cloud,
+            base_rgb,
+            foreground_depth,
+            static_cast<float>(f),
+            initial_object_latent,
+            initial_confidence,
+            fused_point_cloud,
+            prior_features_dc,
+            scales,
+            rots,
+            opacities))
+    {
+        features.index_put_(
+            {torch::indexing::Slice(), torch::indexing::Slice(),
+             0},
+            prior_features_dc.squeeze(1));
+        std::cout << "[Semantic Gaussian Prior] initialized "
+                  << num << " foreground candidates" << std::endl;
     }
     auto initial_candidate_ids = registerTeacherCandidates(
         fused_point_cloud,
@@ -3150,6 +3186,10 @@ void decayOptList(int max_iters, const int train_camera_num,
 
 double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianModel>& pc)
 {
+    if (pc->residual_optimization_iters_ <= 0)
+    {
+        return 0.0;
+    }
     pc->t_start_ = std::chrono::steady_clock::now();
     int updated_num = 0;
     std::vector<int> opt_list;
@@ -3256,11 +3296,14 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
     fs::create_directories(result_path);
 
     std::string render_dir_path = result_path + "/render";
-    fs::create_directories(render_dir_path);
     std::string render_depth_dir_path = result_path + "/render_depth";
-    fs::create_directories(render_depth_dir_path);
     std::string gt_dir_path = result_path + "/gt";
-    fs::create_directories(gt_dir_path);
+    if (pc->evaluation_save_images_)
+    {
+        fs::create_directories(render_dir_path);
+        fs::create_directories(render_depth_dir_path);
+        fs::create_directories(gt_dir_path);
+    }
 
     torch::Tensor bg;
     if (pc->white_background_) bg = torch::ones({3}, torch::kFloat32).cuda();
@@ -3297,27 +3340,30 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             ssims += ssim;
             lpipss += lpips;
 
-            int H = rendered_image.size(1), W = rendered_image.size(2);
+            if (pc->evaluation_save_images_)
+            {
+                int H = rendered_image.size(1), W = rendered_image.size(2);
 
-            torch::Tensor a_cpu = rendered_image.to(torch::kCPU).permute({1, 2, 0}).contiguous();
-            a_cpu = a_cpu.mul(255).clamp(0, 255).to(torch::kU8);
-            cv::Mat a_img(H, W, CV_8UC3, a_cpu.data_ptr<uint8_t>());
-            cv::cvtColor(a_img, a_img, cv::COLOR_RGB2BGR);
-            cv::imwrite(render_dir_path + "/" + train_camera->image_name_, a_img);
+                torch::Tensor a_cpu = rendered_image.to(torch::kCPU).permute({1, 2, 0}).contiguous();
+                a_cpu = a_cpu.mul(255).clamp(0, 255).to(torch::kU8);
+                cv::Mat a_img(H, W, CV_8UC3, a_cpu.data_ptr<uint8_t>());
+                cv::cvtColor(a_img, a_img, cv::COLOR_RGB2BGR);
+                cv::imwrite(render_dir_path + "/" + train_camera->image_name_, a_img);
 
-            torch::Tensor b_cpu = gt_image.to(torch::kCPU).permute({1, 2, 0}).contiguous();
-            b_cpu = b_cpu.mul(255).clamp(0, 255).to(torch::kU8);
-            cv::Mat b_img(H, W, CV_8UC3, b_cpu.data_ptr<uint8_t>());
-            cv::cvtColor(b_img, b_img, cv::COLOR_RGB2BGR);
-            cv::imwrite(gt_dir_path + "/" + train_camera->image_name_, b_img);
+                torch::Tensor b_cpu = gt_image.to(torch::kCPU).permute({1, 2, 0}).contiguous();
+                b_cpu = b_cpu.mul(255).clamp(0, 255).to(torch::kU8);
+                cv::Mat b_img(H, W, CV_8UC3, b_cpu.data_ptr<uint8_t>());
+                cv::cvtColor(b_img, b_img, cv::COLOR_RGB2BGR);
+                cv::imwrite(gt_dir_path + "/" + train_camera->image_name_, b_img);
 
-            torch::Tensor depth_map_normalized = (rendered_depth - rendered_depth.min()) / 
-                                                     (rendered_depth.max() - rendered_depth.min()) * 255;
-            torch::Tensor c_cpu = depth_map_normalized.to(torch::kCPU);
-            cv::Mat c_img(H, W, CV_32FC1, c_cpu.data_ptr<float>());
-            c_img.convertTo(c_img, CV_8UC1);
-            cv::applyColorMap(c_img, c_img, cv::COLORMAP_JET);
-            cv::imwrite(render_depth_dir_path + "/" + train_camera->image_name_, c_img);
+                torch::Tensor depth_map_normalized = (rendered_depth - rendered_depth.min()) /
+                                                         (rendered_depth.max() - rendered_depth.min()) * 255;
+                torch::Tensor c_cpu = depth_map_normalized.to(torch::kCPU);
+                cv::Mat c_img(H, W, CV_32FC1, c_cpu.data_ptr<float>());
+                c_img.convertTo(c_img, CV_8UC1);
+                cv::applyColorMap(c_img, c_img, cv::COLORMAP_JET);
+                cv::imwrite(render_depth_dir_path + "/" + train_camera->image_name_, c_img);
+            }
         }
         psnrs /= dataset->train_cameras_.size();
         ssims /= dataset->train_cameras_.size();
@@ -3347,27 +3393,30 @@ void evaluateVisualQuality(const std::shared_ptr<Dataset>& dataset,
             ssims += ssim;
             lpipss += lpips;
 
-            int H = rendered_image.size(1), W = rendered_image.size(2);
+            if (pc->evaluation_save_images_)
+            {
+                int H = rendered_image.size(1), W = rendered_image.size(2);
 
-            torch::Tensor a_cpu = rendered_image.to(torch::kCPU).permute({1, 2, 0}).contiguous();
-            a_cpu = a_cpu.mul(255).clamp(0, 255).to(torch::kU8);
-            cv::Mat a_img(H, W, CV_8UC3, a_cpu.data_ptr<uint8_t>());
-            cv::cvtColor(a_img, a_img, cv::COLOR_RGB2BGR);
-            cv::imwrite(render_dir_path + "/" + test_camera->image_name_, a_img);
+                torch::Tensor a_cpu = rendered_image.to(torch::kCPU).permute({1, 2, 0}).contiguous();
+                a_cpu = a_cpu.mul(255).clamp(0, 255).to(torch::kU8);
+                cv::Mat a_img(H, W, CV_8UC3, a_cpu.data_ptr<uint8_t>());
+                cv::cvtColor(a_img, a_img, cv::COLOR_RGB2BGR);
+                cv::imwrite(render_dir_path + "/" + test_camera->image_name_, a_img);
 
-            torch::Tensor b_cpu = gt_image.to(torch::kCPU).permute({1, 2, 0}).contiguous();
-            b_cpu = b_cpu.mul(255).clamp(0, 255).to(torch::kU8);
-            cv::Mat b_img(H, W, CV_8UC3, b_cpu.data_ptr<uint8_t>());
-            cv::cvtColor(b_img, b_img, cv::COLOR_RGB2BGR);
-            cv::imwrite(gt_dir_path + "/" + test_camera->image_name_, b_img);
+                torch::Tensor b_cpu = gt_image.to(torch::kCPU).permute({1, 2, 0}).contiguous();
+                b_cpu = b_cpu.mul(255).clamp(0, 255).to(torch::kU8);
+                cv::Mat b_img(H, W, CV_8UC3, b_cpu.data_ptr<uint8_t>());
+                cv::cvtColor(b_img, b_img, cv::COLOR_RGB2BGR);
+                cv::imwrite(gt_dir_path + "/" + test_camera->image_name_, b_img);
 
-            torch::Tensor depth_map_normalized = (rendered_depth - rendered_depth.min()) / 
-                                                     (rendered_depth.max() - rendered_depth.min()) * 255;
-            torch::Tensor c_cpu = depth_map_normalized.to(torch::kCPU);
-            cv::Mat c_img(H, W, CV_32FC1, c_cpu.data_ptr<float>());
-            c_img.convertTo(c_img, CV_8UC1);
-            cv::applyColorMap(c_img, c_img, cv::COLORMAP_JET);
-            cv::imwrite(render_depth_dir_path + "/" + test_camera->image_name_, c_img);
+                torch::Tensor depth_map_normalized = (rendered_depth - rendered_depth.min()) /
+                                                         (rendered_depth.max() - rendered_depth.min()) * 255;
+                torch::Tensor c_cpu = depth_map_normalized.to(torch::kCPU);
+                cv::Mat c_img(H, W, CV_32FC1, c_cpu.data_ptr<float>());
+                c_img.convertTo(c_img, CV_8UC1);
+                cv::applyColorMap(c_img, c_img, cv::COLORMAP_JET);
+                cv::imwrite(render_depth_dir_path + "/" + test_camera->image_name_, c_img);
+            }
         }
         psnrs /= dataset->test_cameras_.size();
         ssims /= dataset->test_cameras_.size();

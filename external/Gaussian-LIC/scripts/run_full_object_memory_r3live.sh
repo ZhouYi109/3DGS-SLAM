@@ -22,8 +22,10 @@ bag_duration_sec="${8:-0}"
 bag_path="${BAG_PATH:-/root/autodl-tmp/datasets/r3live/hku_campus_seq_00.bag}"
 fast_root="/root/autodl-tmp/FastLIVO2_ws/src/FAST-LIVO2"
 gaussian_root="/root/autodl-tmp/catkin_gaussian/src/Gaussian-LIC"
-result_dir="${gaussian_root}/result_runs/paper_retest_20260725/${run_id}"
-log_dir="/root/autodl-tmp/runtime_logs/paper_retest_20260725/${run_id}"
+result_root="${RESULT_ROOT:-${gaussian_root}/result_runs/paper_retest_20260725}"
+log_root="${LOG_ROOT:-/root/autodl-tmp/runtime_logs/paper_retest_20260725}"
+result_dir="${result_root}/${run_id}"
+log_dir="${log_root}/${run_id}"
 
 mkdir -p "${result_dir}" "${log_dir}"
 if find "${result_dir}" -mindepth 1 -print -quit | grep -q .; then
@@ -61,10 +63,19 @@ case "${config_mode}" in
         ;;
 esac
 residual_optimization_iters="${PRIOR_RESIDUAL_OPTIMIZATION_ITERS:-${default_residual_optimization_iters}}"
-if ! [[ "${residual_optimization_iters}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "PRIOR_RESIDUAL_OPTIMIZATION_ITERS must be a positive integer." >&2
+if ! [[ "${residual_optimization_iters}" =~ ^[0-9]+$ ]]; then
+    echo "PRIOR_RESIDUAL_OPTIMIZATION_ITERS must be a non-negative integer." >&2
     exit 2
 fi
+prior_strategy="${SEMANTIC_GAUSSIAN_PRIOR_STRATEGY:-full}"
+case "${prior_strategy}" in
+    full|geometry_only|appearance_only)
+        ;;
+    *)
+        echo "Unsupported SEMANTIC_GAUSSIAN_PRIOR_STRATEGY: ${prior_strategy}" >&2
+        exit 2
+        ;;
+esac
 semantic_gaussian_prior_override="${SEMANTIC_GAUSSIAN_PRIOR_ENABLED:-}"
 if [ -n "${semantic_gaussian_prior_override}" ] \
     && [ "${semantic_gaussian_prior_override}" != "true" ] \
@@ -130,11 +141,7 @@ if [ "${semantic_mode}" = "grid" ] || [ "${semantic_mode}" = "sam" ]; then
     online_semantic_enabled=true
     semantic_wait_timeout_sec="${SEMANTIC_WAIT_TIMEOUT_SEC:-0.8}"
 fi
-if [ "${config_mode}" = "r3live_prior" ]; then
-    if [ "${semantic_mode}" != "object" ]; then
-        echo "r3live_prior requires semantic_mode=object." >&2
-        exit 2
-    fi
+if [ "${config_mode}" = "r3live_prior" ] && [ "${semantic_mode}" = "object" ]; then
     online_semantic_enabled=true
 fi
 if [ "${config_mode}" = "r3live_teacher" ]; then
@@ -218,7 +225,9 @@ stdbuf -oL -eL "/root/autodl-tmp/catkin_gaussian/devel/lib/gaussian_lic/gs_mappi
     _semantic_pending_grace_sec:="${semantic_pending_grace_sec}" \
     _semantic_feature_delta_required:="${semantic_feature_delta_required}" \
     _semantic_gaussian_prior_model_path:="${SEMANTIC_GAUSSIAN_PRIOR_MODEL:-/root/autodl-fs/models/semantic_gaussian_prior/r3live_distilled.ts}" \
+    _semantic_gaussian_prior_strategy:="${prior_strategy}" \
     _residual_optimization_iters:="${residual_optimization_iters}" \
+    _evaluation_save_images:="${EVALUATION_SAVE_IMAGES:-true}" \
     "${prior_override_remap[@]}" \
     "${weight_remap[@]}" \
     >"${log_dir}/gaussian.log" 2>&1 &
@@ -512,6 +521,7 @@ random_seed=${random_seed}
 config_mode=${config_mode}
 residual_optimization_iters=${residual_optimization_iters}
 semantic_gaussian_prior_override=${semantic_gaussian_prior_override:-config}
+semantic_gaussian_prior_strategy=${prior_strategy}
 frontend_mode=${frontend_mode}
 semantic_mode=${semantic_mode}
 semantic_ready=${semantic_ready}
@@ -547,6 +557,7 @@ echo "RANDOM_SEED=${random_seed}"
 echo "CONFIG_MODE=${config_mode}"
 echo "RESIDUAL_OPTIMIZATION_ITERS=${residual_optimization_iters}"
 echo "SEMANTIC_GAUSSIAN_PRIOR_OVERRIDE=${semantic_gaussian_prior_override:-config}"
+echo "SEMANTIC_GAUSSIAN_PRIOR_STRATEGY=${prior_strategy}"
 echo "FRONTEND_MODE=${frontend_mode}"
 echo "SEMANTIC_MODE=${semantic_mode}"
 echo "SEMANTIC_READY=${semantic_ready}"

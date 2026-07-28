@@ -36,6 +36,7 @@ prune_opacity_threshold: 0.0
 # and is followed by a small number of ordinary Gaussian-LIC optimization steps.
 semantic_gaussian_prior_enabled: false
 semantic_gaussian_prior_model_path: ""
+semantic_gaussian_prior_strategy: "full"
 semantic_gaussian_prior_mean_offset_limit: 1.0
 semantic_gaussian_prior_log_scale_limit: 1.0
 semantic_gaussian_prior_color_residual_limit: 0.25

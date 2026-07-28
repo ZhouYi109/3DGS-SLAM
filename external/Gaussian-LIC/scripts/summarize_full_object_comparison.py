@@ -23,6 +23,7 @@ GAUSSIAN_PATTERNS = {
     "novel_psnr": r"\[In-Sequence Novel View PSNR\]\s+([0-9.]+)",
     "novel_ssim": r"\[In-Sequence Novel View SSIM\]\s+([0-9.]+)",
     "novel_lpips": r"\[In-Sequence Novel View LPIPS\]\s+([0-9.]+)",
+    "evaluation_sec": r"\[Total Evaluation Time\]\s+([0-9.]+)s",
 }
 
 WEIGHT_COLUMNS = (

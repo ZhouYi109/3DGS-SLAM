@@ -93,11 +93,13 @@ public:
         semantic_storage_growth_rows = node["semantic_storage_growth_rows"] ? node["semantic_storage_growth_rows"].as<int>() : 32768;
         semantic_gaussian_prior_enabled = node["semantic_gaussian_prior_enabled"] ? node["semantic_gaussian_prior_enabled"].as<bool>() : false;
         semantic_gaussian_prior_model_path = node["semantic_gaussian_prior_model_path"] ? node["semantic_gaussian_prior_model_path"].as<std::string>() : "";
+        semantic_gaussian_prior_strategy = node["semantic_gaussian_prior_strategy"] ? node["semantic_gaussian_prior_strategy"].as<std::string>() : "full";
         semantic_gaussian_prior_mean_offset_limit = node["semantic_gaussian_prior_mean_offset_limit"] ? node["semantic_gaussian_prior_mean_offset_limit"].as<double>() : 1.0;
         semantic_gaussian_prior_log_scale_limit = node["semantic_gaussian_prior_log_scale_limit"] ? node["semantic_gaussian_prior_log_scale_limit"].as<double>() : 1.0;
         semantic_gaussian_prior_color_residual_limit = node["semantic_gaussian_prior_color_residual_limit"] ? node["semantic_gaussian_prior_color_residual_limit"].as<double>() : 0.25;
         semantic_gaussian_prior_opacity_logit_limit = node["semantic_gaussian_prior_opacity_logit_limit"] ? node["semantic_gaussian_prior_opacity_logit_limit"].as<double>() : 2.0;
         residual_optimization_iters = node["residual_optimization_iters"] ? node["residual_optimization_iters"].as<int>() : 100;
+        evaluation_save_images = node["evaluation_save_images"] ? node["evaluation_save_images"].as<bool>() : true;
         teacher_distillation_export_enabled = node["teacher_distillation_export_enabled"] ? node["teacher_distillation_export_enabled"].as<bool>() : false;
         prune_every_keyframes = node["prune_every_keyframes"] ? node["prune_every_keyframes"].as<int>() : 0;
         prune_opacity_threshold = node["prune_opacity_threshold"] ? node["prune_opacity_threshold"].as<double>() : 0.0;
@@ -168,11 +170,13 @@ public:
     int semantic_storage_growth_rows;
     bool semantic_gaussian_prior_enabled;
     std::string semantic_gaussian_prior_model_path;
+    std::string semantic_gaussian_prior_strategy;
     double semantic_gaussian_prior_mean_offset_limit;
     double semantic_gaussian_prior_log_scale_limit;
     double semantic_gaussian_prior_color_residual_limit;
     double semantic_gaussian_prior_opacity_logit_limit;
     int residual_optimization_iters;
+    bool evaluation_save_images;
     bool teacher_distillation_export_enabled;
     int prune_every_keyframes;
     double prune_opacity_threshold;
