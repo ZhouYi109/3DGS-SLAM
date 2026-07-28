@@ -1,0 +1,51 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="bag_path" />
+  <arg name="packet_path" default="$(find fast_livo)/Log/3dgs_frontend_packet.jsonl" />
+  <arg name="fastlivo_config" default="$(find fast_livo)/config/r3live_hku.yaml" />
+  <arg name="camera_model_config" default="$(find fast_livo)/config/camera_pinhole.yaml" />
+  <arg name="gs_config_path" default="config/fastlivo2.yaml" />
+  <arg name="result_path" default="$(find gaussian_lic)/result" />
+  <arg name="semantic_bundle_path" default="" />
+  <arg name="semantic_debug_print_on_load" default="false" />
+  <arg name="semantic_debug_sample_count" default="3" />
+  <arg name="semantic_debug_print_dim" default="8" />
+  <arg name="semantic_debug_stats_on_load" default="false" />
+  <arg name="semantic_debug_stats_dim" default="8" />
+  <arg name="image_topic" default="/camera/image_color" />
+  <arg name="lidar_topic" default="/livox/lidar" />
+  <arg name="max_sync_diff" default="0.10" />
+  <arg name="publish_rate" default="20.0" />
+  <arg name="point_skip" default="10" />
+  <arg name="depth_history" default="5" />
+  <arg name="max_depth" default="20.0" />
+  <arg name="point_mode" default="raw_lidar" />
+
+  <include file="$(find fast_livo)/launch/fastlivo2_gaussianlic_bridge.launch">
+    <arg name="bag_path" value="$(arg bag_path)" />
+    <arg name="packet_path" value="$(arg packet_path)" />
+    <arg name="fastlivo_config" value="$(arg fastlivo_config)" />
+    <arg name="camera_model_config" value="$(arg camera_model_config)" />
+    <arg name="image_topic" value="$(arg image_topic)" />
+    <arg name="lidar_topic" value="$(arg lidar_topic)" />
+    <arg name="max_sync_diff" value="$(arg max_sync_diff)" />
+    <arg name="publish_rate" value="$(arg publish_rate)" />
+    <arg name="point_skip" value="$(arg point_skip)" />
+    <arg name="depth_history" value="$(arg depth_history)" />
+    <arg name="max_depth" value="$(arg max_depth)" />
+    <arg name="point_mode" value="$(arg point_mode)" />
+  </include>
+
+  <node pkg="gaussian_lic" type="gs_mapping" name="gs_mapping" output="screen">
+    <env name="LD_LIBRARY_PATH" value="/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/root/Software/libtorch/lib" />
+    <param name="config_path" type="string" value="$(find gaussian_lic)/$(arg gs_config_path)" />
+    <param name="result_path" type="string" value="$(arg result_path)" />
+    <param name="semantic_bundle_path" type="string" value="$(arg semantic_bundle_path)" />
+    <param name="semantic_debug_print_on_load" type="bool" value="$(arg semantic_debug_print_on_load)" />
+    <param name="semantic_debug_sample_count" type="int" value="$(arg semantic_debug_sample_count)" />
+    <param name="semantic_debug_print_dim" type="int" value="$(arg semantic_debug_print_dim)" />
+    <param name="semantic_debug_stats_on_load" type="bool" value="$(arg semantic_debug_stats_on_load)" />
+    <param name="semantic_debug_stats_dim" type="int" value="$(arg semantic_debug_stats_dim)" />
+    <param name="lpips_path" type="string" value="$(find gaussian_lic)/src/lpips" />
+  </node>
+</launch>

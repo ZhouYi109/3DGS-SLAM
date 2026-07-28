@@ -1,0 +1,64 @@
+# Full-optimization R3LIVE Teacher with candidate correspondence export.
+width: 640
+height: 512
+fx: 431.71205
+fy: 431.70855
+cx: 320.3404
+cy: 259.1696
+
+select_every_k_frame: 5
+depth_completion: false
+patch_size: 10
+max_depth: 20
+checkpoint_every_keyframes: 0
+
+online_semantic_enabled: true
+semantic_feature_topic: "/semantic_feature_grid"
+semantic_object_feature_delta_topic: "/semantic_object_latent_delta"
+semantic_pending_topic: "/semantic_pending_frame"
+semantic_compute_grant_topic: "/semantic_compute_grant"
+semantic_sync_tolerance_sec: 0.02
+semantic_wait_timeout_sec: 0.0
+semantic_wait_pending_only: false
+semantic_pending_grace_sec: 0.0
+semantic_feature_delta_required: false
+semantic_confidence_threshold: 0.05
+semantic_compact_dim: 16
+semantic_memory_similarity_threshold: 0.90
+semantic_projection_seed: 20260726
+semantic_storage_growth_rows: 32768
+prune_every_keyframes: 0
+prune_opacity_threshold: 0.0
+
+semantic_gaussian_prior_enabled: false
+semantic_gaussian_prior_model_path: ""
+semantic_gaussian_prior_mean_offset_limit: 1.0
+semantic_gaussian_prior_log_scale_limit: 1.0
+semantic_gaussian_prior_color_residual_limit: 0.25
+semantic_gaussian_prior_opacity_logit_limit: 2.0
+residual_optimization_iters: 100
+teacher_distillation_export_enabled: true
+
+sh_degree: 3
+white_background: false
+random_background: false
+convert_SHs_python: false
+compute_cov3D_python: false
+lambda_erank: 0
+scaling_scale: 2
+
+position_lr: 0.00016
+feature_lr: 0.0050
+opacity_lr: 0.05
+scaling_lr: 0.015
+rotation_lr: 0.001
+lambda_dssim: 0.2
+optimize_depth: false
+lambda_depth: 0.0
+iteration_decay: false
+
+apply_exposure: true
+exposure_lr: 0.001
+skybox_points_num: 100000
+skybox_radius: 10000
+

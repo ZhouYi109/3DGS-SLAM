@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="bundle_dir" default="" />
+  <arg name="point_cloud_ply" default="" />
+  <arg name="query_npy" default="" />
+  <arg name="output_ply" default="" />
+  <arg name="output_json" default="" />
+  <arg name="topk" default="10" />
+  <arg name="ignore_mask" default="false" />
+
+  <node pkg="gaussian_lic" type="semantic_query_server" name="semantic_query_server" output="screen">
+    <env name="LD_LIBRARY_PATH" value="/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/root/Software/libtorch/lib" />
+    <param name="bundle_dir" type="string" value="$(arg bundle_dir)" />
+    <param name="point_cloud_ply" type="string" value="$(arg point_cloud_ply)" />
+    <param name="query_npy" type="string" value="$(arg query_npy)" />
+    <param name="output_ply" type="string" value="$(arg output_ply)" />
+    <param name="output_json" type="string" value="$(arg output_json)" />
+    <param name="topk" type="int" value="$(arg topk)" />
+    <param name="ignore_mask" type="bool" value="$(arg ignore_mask)" />
+  </node>
+</launch>

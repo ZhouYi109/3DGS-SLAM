@@ -1,0 +1,55 @@
+# Local Codex/session state and temporary connection helpers
+.agents/
+.codex_*
+
+# Python caches and virtual environments
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Catkin, CMake, and native build products
+**/build/
+**/devel/
+**/install/
+**/.catkin_tools/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/Makefile
+
+# Runtime logs and generated experiment artifacts
+**/runtime_logs/
+**/logs/
+*.log
+*.bag
+*.db3
+*.pcd
+*.jsonl
+FAST-LIVO2/Log/*.csv
+FAST-LIVO2/Log/*.svg
+FAST-LIVO2/Log/result/r3live_*
+external/Gaussian-LIC/result/
+
+# Datasets, model weights, and generated acceleration engines
+datasets/
+data/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.engine
+*.plan
+*.npy
+*.npz
+*.zip
+*.tar.gz
+
+# Editor, OS, and backup files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.bak
+*.bak_*
+*~

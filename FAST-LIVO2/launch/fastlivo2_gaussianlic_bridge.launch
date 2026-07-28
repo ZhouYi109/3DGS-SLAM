@@ -1,0 +1,35 @@
+<launch>
+  <arg name="bag_path" />
+  <arg name="packet_path" default="$(find fast_livo)/Log/3dgs_frontend_packet.jsonl" />
+  <arg name="fastlivo_config" default="$(find fast_livo)/config/r3live_hku.yaml" />
+  <arg name="camera_model_config" default="$(find fast_livo)/config/camera_pinhole.yaml" />
+  <arg name="image_topic" default="/camera/image_color" />
+  <arg name="lidar_topic" default="/livox/lidar" />
+  <arg name="max_sync_diff" default="0.10" />
+  <arg name="publish_rate" default="20.0" />
+  <arg name="point_skip" default="10" />
+  <arg name="depth_history" default="5" />
+  <arg name="max_depth" default="20.0" />
+  <arg name="point_mode" default="raw_lidar" />
+
+  <node
+    pkg="fast_livo"
+    type="replay_3dgs_frontend_packet.py"
+    name="fastlivo3dgs_packet_bridge"
+    output="screen"
+    required="true"
+    args="
+      --bag-path $(arg bag_path)
+      --packet-path $(arg packet_path)
+      --fastlivo-config $(arg fastlivo_config)
+      --camera-model-config $(arg camera_model_config)
+      --image-topic $(arg image_topic)
+      --lidar-topic $(arg lidar_topic)
+      --max-sync-diff $(arg max_sync_diff)
+      --publish-rate $(arg publish_rate)
+      --point-skip $(arg point_skip)
+      --depth-history $(arg depth_history)
+      --max-depth $(arg max_depth)
+      --point-mode $(arg point_mode)
+    " />
+</launch>

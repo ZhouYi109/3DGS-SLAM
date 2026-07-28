@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="config_path"       default = "config/r3live.yaml" />
+
+  <node pkg="gaussian_lic" type="gs_mapping" name="$(anon gs_mapping)" output="screen">
+    <env name="LD_LIBRARY_PATH" value="/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/root/Software/libtorch/lib" />
+    <param name="config_path"     type="string" value="$(find gaussian_lic)/$(arg config_path)" />
+    <param name="result_path"     type="string" value="$(find gaussian_lic)/result" />
+    <param name="lpips_path"     type="string" value="$(find gaussian_lic)/src/lpips" />
+  </node>
+
+</launch>

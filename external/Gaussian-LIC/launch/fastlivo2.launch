@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="config_path"       default = "config/fastlivo2.yaml" />
+  <arg name="result_path"       default = "$(find gaussian_lic)/result" />
+  <arg name="semantic_bundle_path" default = "" />
+  <arg name="semantic_debug_print_on_load" default = "false" />
+  <arg name="semantic_debug_sample_count" default = "3" />
+  <arg name="semantic_debug_print_dim" default = "8" />
+  <arg name="semantic_debug_stats_on_load" default = "false" />
+  <arg name="semantic_debug_stats_dim" default = "8" />
+
+  <node pkg="gaussian_lic" type="gs_mapping" name="$(anon gs_mapping)" output="screen">
+    <env name="LD_LIBRARY_PATH" value="/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/root/Software/libtorch/lib" />
+    <param name="config_path"     type="string" value="$(find gaussian_lic)/$(arg config_path)" />
+    <param name="result_path"     type="string" value="$(arg result_path)" />
+    <param name="semantic_bundle_path" type="string" value="$(arg semantic_bundle_path)" />
+    <param name="semantic_debug_print_on_load" type="bool" value="$(arg semantic_debug_print_on_load)" />
+    <param name="semantic_debug_sample_count" type="int" value="$(arg semantic_debug_sample_count)" />
+    <param name="semantic_debug_print_dim" type="int" value="$(arg semantic_debug_print_dim)" />
+    <param name="semantic_debug_stats_on_load" type="bool" value="$(arg semantic_debug_stats_on_load)" />
+    <param name="semantic_debug_stats_dim" type="int" value="$(arg semantic_debug_stats_dim)" />
+    <param name="lpips_path"     type="string" value="$(find gaussian_lic)/src/lpips" />
+  </node>
+
+</launch>

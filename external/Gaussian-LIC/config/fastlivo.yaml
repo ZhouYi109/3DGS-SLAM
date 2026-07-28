@@ -1,0 +1,34 @@
+width: 640
+height: 512
+fx: 431.795259219
+fy: 431.550090267
+cx: 310.833037316
+cy: 266.985989326
+
+select_every_k_frame: 5
+depth_completion: true
+patch_size: 10
+max_depth: 20
+
+sh_degree: 3
+white_background: false  # no adjustment needed
+random_background: false  # no adjustment needed
+convert_SHs_python: false  # no adjustment needed
+compute_cov3D_python: false  # no adjustment needed
+lambda_erank: 0  # no adjustment needed
+scaling_scale: 1  # the larger value tends to yield less Gaussians
+
+position_lr: 0.00016
+feature_lr: 0.0050  # the larger value tends to yield better performance
+opacity_lr: 0.05
+scaling_lr: 0.005  # the larger value tends to yield less Gaussians
+rotation_lr: 0.001
+lambda_dssim: 0.2
+optimize_depth: true
+lambda_depth: 0.005
+iteration_decay: false
+
+apply_exposure: false
+exposure_lr: 0.001
+skybox_points_num: 0  # 100000
+skybox_radius: 1000
