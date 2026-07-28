@@ -65,6 +65,19 @@ if ! [[ "${residual_optimization_iters}" =~ ^[1-9][0-9]*$ ]]; then
     echo "PRIOR_RESIDUAL_OPTIMIZATION_ITERS must be a positive integer." >&2
     exit 2
 fi
+semantic_gaussian_prior_override="${SEMANTIC_GAUSSIAN_PRIOR_ENABLED:-}"
+if [ -n "${semantic_gaussian_prior_override}" ] \
+    && [ "${semantic_gaussian_prior_override}" != "true" ] \
+    && [ "${semantic_gaussian_prior_override}" != "false" ]; then
+    echo "SEMANTIC_GAUSSIAN_PRIOR_ENABLED must be true, false, or unset." >&2
+    exit 2
+fi
+prior_override_remap=()
+if [ -n "${semantic_gaussian_prior_override}" ]; then
+    prior_override_remap=(
+        "_semantic_gaussian_prior_enabled:=${semantic_gaussian_prior_override}"
+    )
+fi
 case "${frontend_mode}" in
     legacy)
         front_launch="${fast_root}/launch/mapping_r3live_hku.launch"
@@ -206,6 +219,7 @@ stdbuf -oL -eL "/root/autodl-tmp/catkin_gaussian/devel/lib/gaussian_lic/gs_mappi
     _semantic_feature_delta_required:="${semantic_feature_delta_required}" \
     _semantic_gaussian_prior_model_path:="${SEMANTIC_GAUSSIAN_PRIOR_MODEL:-/root/autodl-fs/models/semantic_gaussian_prior/r3live_distilled.ts}" \
     _residual_optimization_iters:="${residual_optimization_iters}" \
+    "${prior_override_remap[@]}" \
     "${weight_remap[@]}" \
     >"${log_dir}/gaussian.log" 2>&1 &
 gaussian_pid=$!
@@ -496,6 +510,8 @@ dynamic_appearance_weight=${dynamic_appearance_weight}
 dynamic_geometry_capacity=${dynamic_geometry_capacity}
 random_seed=${random_seed}
 config_mode=${config_mode}
+residual_optimization_iters=${residual_optimization_iters}
+semantic_gaussian_prior_override=${semantic_gaussian_prior_override:-config}
 frontend_mode=${frontend_mode}
 semantic_mode=${semantic_mode}
 semantic_ready=${semantic_ready}
@@ -530,6 +546,7 @@ echo "DYNAMIC_GEOMETRY_CAPACITY=${dynamic_geometry_capacity}"
 echo "RANDOM_SEED=${random_seed}"
 echo "CONFIG_MODE=${config_mode}"
 echo "RESIDUAL_OPTIMIZATION_ITERS=${residual_optimization_iters}"
+echo "SEMANTIC_GAUSSIAN_PRIOR_OVERRIDE=${semantic_gaussian_prior_override:-config}"
 echo "FRONTEND_MODE=${frontend_mode}"
 echo "SEMANTIC_MODE=${semantic_mode}"
 echo "SEMANTIC_READY=${semantic_ready}"

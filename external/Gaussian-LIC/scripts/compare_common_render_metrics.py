@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from collections import OrderedDict
 from pathlib import Path
 
 import cv2
@@ -75,24 +76,66 @@ def evaluate(
     return {key: value / len(pairs) for key, value in totals.items()}
 
 
+def parse_named_result(value: str) -> tuple[str, Path]:
+    name, separator, path = value.partition("=")
+    if not separator or not name.strip() or not path.strip():
+        raise argparse.ArgumentTypeError(
+            "--result must use the form NAME=/absolute/result/path"
+        )
+    return name.strip(), Path(path.strip())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--result-a", type=Path, required=True)
-    parser.add_argument("--result-b", type=Path, required=True)
+    parser.add_argument("--result-a", type=Path)
+    parser.add_argument("--result-b", type=Path)
+    parser.add_argument(
+        "--result",
+        action="append",
+        type=parse_named_result,
+        default=[],
+        metavar="NAME=PATH",
+        help="Named run; repeat to evaluate all runs on one shared GT intersection.",
+    )
+    parser.add_argument(
+        "--reference",
+        help="Named run used for deltas in multi-run mode (defaults to the last run).",
+    )
     parser.add_argument("--lpips-model", type=Path, required=True)
     parser.add_argument("--split-prefix", default="test_")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
-    map_a = image_map(args.result_a, args.split_prefix)
-    map_b = image_map(args.result_b, args.split_prefix)
-    common = sorted(set(map_a) & set(map_b))
+    results: OrderedDict[str, Path] = OrderedDict()
+    if args.result:
+        for name, path in args.result:
+            if name in results:
+                parser.error(f"duplicate --result name: {name}")
+            results[name] = path
+        if args.result_a or args.result_b:
+            parser.error("--result cannot be combined with --result-a/--result-b")
+    else:
+        if not args.result_a or not args.result_b:
+            parser.error("provide repeated --result entries or both --result-a/--result-b")
+        results["result_a"] = args.result_a
+        results["result_b"] = args.result_b
+
+    maps = {
+        name: image_map(result, args.split_prefix)
+        for name, result in results.items()
+    }
+    common = sorted(set.intersection(*(set(mapped) for mapped in maps.values())))
     if not common:
         raise RuntimeError("the runs have no source frames in common")
 
-    pairs_a = [(map_a[digest], Path(map_a[digest].name)) for digest in common]
-    pairs_b = [(map_a[digest], Path(map_b[digest].name)) for digest in common]
+    canonical_map = next(iter(maps.values()))
+    pairs = {
+        name: [
+            (canonical_map[digest], Path(mapped[digest].name)) for digest in common
+        ]
+        for name, mapped in maps.items()
+    }
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     lpips = torch.jit.load(str(args.lpips_model), map_location=device).eval()
     axis = torch.arange(11, device=device, dtype=torch.float32) - 5
@@ -102,23 +145,39 @@ def main() -> None:
     window = window.expand(3, 1, 11, 11).contiguous()
 
     with torch.inference_mode():
-        metrics_a = evaluate(
-            args.result_a, pairs_a, lpips, window, device, args.batch_size
-        )
-        metrics_b = evaluate(
-            args.result_b, pairs_b, lpips, window, device, args.batch_size
-        )
+        metrics = {
+            name: evaluate(
+                result, pairs[name], lpips, window, device, args.batch_size
+            )
+            for name, result in results.items()
+        }
+
+    common_hash = hashlib.sha256("\n".join(common).encode("ascii")).hexdigest()
+    reference = args.reference or next(reversed(results))
+    if reference not in results:
+        parser.error(f"--reference does not match a --result name: {reference}")
+    reference_metrics = metrics[reference]
     payload = {
-        "format": "common-render-metrics-v1",
+        "format": "common-render-metrics-v2",
         "split_prefix": args.split_prefix,
         "common_source_frames": len(common),
-        "result_a_source_frames": len(map_a),
-        "result_b_source_frames": len(map_b),
+        "common_source_hashes_sha256": common_hash,
         "saved_jpeg_metrics": True,
-        "result_a": {"path": str(args.result_a), **metrics_a},
-        "result_b": {"path": str(args.result_b), **metrics_b},
-        "delta_a_minus_b": {
-            key: metrics_a[key] - metrics_b[key] for key in metrics_a
+        "reference": reference,
+        "results": {
+            name: {
+                "path": str(results[name]),
+                "source_frames": len(maps[name]),
+                **metrics[name],
+            }
+            for name in results
+        },
+        "delta_vs_reference": {
+            name: {
+                key: values[key] - reference_metrics[key] for key in values
+            }
+            for name, values in metrics.items()
+            if name != reference
         },
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
