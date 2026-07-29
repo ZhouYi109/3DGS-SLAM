@@ -13,17 +13,111 @@ import torch
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from semantic_gaussian_prior_model import (
-    INPUT_DIM,
+    BASE_INPUT_DIM,
+    CONTEXT_INPUT_DIM,
     OUTPUT_DIM,
+    OBJECT_LATENT_END_INDEX,
+    OBJECT_LATENT_START_INDEX,
+    SEMANTIC_CONFIDENCE_INDEX,
+    SUPPORTED_INPUT_DIMS,
     SemanticGaussianPriorHead,
+    input_contract,
     prior_loss,
 )
 
 
+def configure_context_adapter_only(
+    model: SemanticGaussianPriorHead,
+) -> tuple[torch.nn.Parameter, torch.Tensor]:
+    if model.input_dim != CONTEXT_INPUT_DIM:
+        raise ValueError("context-adapter-only training requires a 38D model")
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    input_weight = model.backbone[0].weight
+    input_weight.requires_grad_(True)
+    frozen_base_columns = input_weight[:, :BASE_INPUT_DIM].detach().clone()
+    gradient_mask = torch.zeros_like(input_weight)
+    gradient_mask[:, BASE_INPUT_DIM:] = 1.0
+    input_weight.register_hook(lambda gradient: gradient * gradient_mask)
+    return input_weight, frozen_base_columns
+
+
+def restore_context_adapter_base_columns(
+    input_weight: torch.nn.Parameter,
+    frozen_base_columns: torch.Tensor,
+) -> None:
+    with torch.no_grad():
+        input_weight[:, :BASE_INPUT_DIM].copy_(frozen_base_columns)
+
+
+def load_compatible_model_state(
+    model: SemanticGaussianPriorHead,
+    checkpoint_state: dict[str, torch.Tensor],
+) -> None:
+    compatible_state = dict(checkpoint_state)
+    first_weight_key = "backbone.0.weight"
+    current_state = model.state_dict()
+    if (
+        first_weight_key in compatible_state
+        and compatible_state[first_weight_key].shape
+        != current_state[first_weight_key].shape
+    ):
+        old_weight = compatible_state[first_weight_key]
+        target_weight = current_state[first_weight_key]
+        if old_weight.shape[0] != target_weight.shape[0]:
+            raise ValueError(
+                "cannot transfer checkpoint with a different hidden dimension"
+            )
+        copied_columns = min(old_weight.shape[1], target_weight.shape[1])
+        new_weight = torch.zeros_like(target_weight)
+        new_weight[:, :copied_columns] = old_weight[:, :copied_columns].to(
+            device=new_weight.device,
+            dtype=new_weight.dtype,
+        )
+        compatible_state[first_weight_key] = new_weight
+    model.load_state_dict(compatible_state)
+
+
 class PriorShardDataset(Dataset):
-    def __init__(self, manifest: Path, split: str, source: str) -> None:
+    def __init__(
+        self,
+        manifest: Path,
+        split: str,
+        source: str,
+        zero_input_features: tuple[str, ...] = (),
+    ) -> None:
         payload = json.loads(manifest.read_text(encoding="utf-8"))
         root = manifest.parent
+        self.input_dim = int(payload["input_dim"])
+        if self.input_dim not in SUPPORTED_INPUT_DIMS:
+            raise ValueError(
+                f"unsupported manifest input dimension: {self.input_dim}"
+            )
+        inferred_contract, inferred_features = input_contract(self.input_dim)
+        self.input_contract = str(
+            payload.get("input_contract", inferred_contract)
+        )
+        self.input_features = tuple(
+            payload.get("input_features", inferred_features)
+        )
+        if (
+            self.input_contract != inferred_contract
+            or self.input_features != inferred_features
+        ):
+            raise ValueError(
+                "manifest input contract does not match its input dimension"
+            )
+        unknown_features = sorted(
+            set(zero_input_features).difference(self.input_features)
+        )
+        if unknown_features:
+            raise ValueError(
+                "cannot zero unknown input features: "
+                + ", ".join(unknown_features)
+            )
+        self.zero_input_indices = tuple(
+            self.input_features.index(name) for name in zero_input_features
+        )
         self.samples: list[tuple[Path, int]] = []
         self.sample_sequence_ids: list[int] = []
         self.sequence_names: list[str] = []
@@ -57,8 +151,10 @@ class PriorShardDataset(Dataset):
                 data["weight"] if "weight" in data else np.ones(inputs.shape[0]),
                 dtype=np.float32,
             )
-            if inputs.ndim != 2 or inputs.shape[1] != INPUT_DIM:
-                raise ValueError(f"{path}: input must be [N,{INPUT_DIM}]")
+            if inputs.ndim != 2 or inputs.shape[1] != self.input_dim:
+                raise ValueError(
+                    f"{path}: input must be [N,{self.input_dim}]"
+                )
             if targets.shape != (inputs.shape[0], OUTPUT_DIM):
                 raise ValueError(f"{path}: target must be [N,{OUTPUT_DIM}]")
             if weights.shape != (inputs.shape[0],):
@@ -69,7 +165,11 @@ class PriorShardDataset(Dataset):
     def __getitem__(self, index: int):
         path, row = self.samples[index]
         inputs, targets, weights = self._load(path)
-        return inputs[row], targets[row], weights[row]
+        features = inputs[row]
+        if self.zero_input_indices:
+            features = features.copy()
+            features[list(self.zero_input_indices)] = 0.0
+        return features, targets[row], weights[row]
 
     def _unique_shards(self) -> list[tuple[Path, int, int]]:
         shards: list[tuple[Path, int, int]] = []
@@ -94,8 +194,16 @@ class PriorShardDataset(Dataset):
         for path, start, end in self._unique_shards():
             inputs, _, _ = self._load(path)
             semantic[start:end] = (
-                (inputs[:, -1] > 0.0)
-                & (np.abs(inputs[:, 7:23]).sum(axis=1) > 0.0)
+                (inputs[:, SEMANTIC_CONFIDENCE_INDEX] > 0.0)
+                & (
+                    np.abs(
+                        inputs[
+                            :,
+                            OBJECT_LATENT_START_INDEX:OBJECT_LATENT_END_INDEX,
+                        ]
+                    ).sum(axis=1)
+                    > 0.0
+                )
             )
 
         sequence_ids = np.asarray(self.sample_sequence_ids, dtype=np.int32)
@@ -160,8 +268,14 @@ def evaluate(
         weight_device = weight.to(device)
         prediction = model(features_device)
         semantic_mask = (
-            (features_device[:, -1] > 0.0)
-            & (features_device[:, 7:23].abs().sum(dim=1) > 0.0)
+            (features_device[:, SEMANTIC_CONFIDENCE_INDEX] > 0.0)
+            & (
+                features_device[
+                    :,
+                    OBJECT_LATENT_START_INDEX:OBJECT_LATENT_END_INDEX,
+                ].abs().sum(dim=1)
+                > 0.0
+            )
         )
         masks = {
             "": torch.ones_like(semantic_mask, dtype=torch.bool),
@@ -228,6 +342,16 @@ def main() -> None:
     parser.add_argument("--sequence-balanced-sampling", action="store_true")
     parser.add_argument("--freeze-backbone-blocks", type=int, default=0)
     parser.add_argument("--backbone-learning-rate-scale", type=float, default=1.0)
+    parser.add_argument("--context-adapter-only", action="store_true")
+    parser.add_argument(
+        "--zero-input-feature",
+        action="append",
+        default=[],
+        help=(
+            "Set a named manifest feature to zero in both training and "
+            "validation; repeat for controlled feature ablations."
+        ),
+    )
     parser.add_argument("--mean-loss-weight", type=float, default=1.0)
     parser.add_argument("--scale-loss-weight", type=float, default=1.0)
     parser.add_argument("--rotation-loss-weight", type=float, default=0.5)
@@ -251,6 +375,13 @@ def main() -> None:
 
     if not 0.0 <= args.semantic_sample_fraction < 1.0:
         raise ValueError("--semantic-sample-fraction must be in [0,1)")
+    if args.context_adapter_only and not args.init_checkpoint:
+        raise ValueError("--context-adapter-only requires --init-checkpoint")
+    if args.context_adapter_only and args.freeze_backbone_blocks != 0:
+        raise ValueError(
+            "--context-adapter-only cannot be combined with "
+            "--freeze-backbone-blocks"
+        )
     if not 0.0 < args.backbone_learning_rate_scale <= 1.0:
         raise ValueError("--backbone-learning-rate-scale must be in (0,1]")
     if not 0.0 <= args.saturated_mean_weight <= 1.0:
@@ -281,8 +412,19 @@ def main() -> None:
         torch.cuda.manual_seed_all(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     source = "nuscenes" if args.stage == "nuscenes_pretrain" else "r3live_teacher"
-    train_data = PriorShardDataset(args.manifest, "train", source)
-    validation_data = PriorShardDataset(args.manifest, "validation", source)
+    zero_input_features = tuple(dict.fromkeys(args.zero_input_feature))
+    train_data = PriorShardDataset(
+        args.manifest,
+        "train",
+        source,
+        zero_input_features,
+    )
+    validation_data = PriorShardDataset(
+        args.manifest,
+        "validation",
+        source,
+        zero_input_features,
+    )
 
     sampler = None
     sampling_summary = None
@@ -314,10 +456,21 @@ def main() -> None:
         pin_memory=device.type == "cuda",
     )
 
-    model = SemanticGaussianPriorHead(args.hidden_dim, args.layers).to(device)
+    if train_data.input_dim != validation_data.input_dim:
+        raise ValueError("training and validation input dimensions differ")
+    if (
+        train_data.input_contract != validation_data.input_contract
+        or train_data.input_features != validation_data.input_features
+    ):
+        raise ValueError("training and validation input contracts differ")
+    model = SemanticGaussianPriorHead(
+        args.hidden_dim,
+        args.layers,
+        train_data.input_dim,
+    ).to(device)
     if args.init_checkpoint:
         checkpoint = torch.load(args.init_checkpoint, map_location="cpu")
-        model.load_state_dict(checkpoint["model"])
+        load_compatible_model_state(model, checkpoint["model"])
     backbone_blocks = args.layers - 1
     if not 0 <= args.freeze_backbone_blocks <= backbone_blocks:
         raise ValueError(
@@ -327,18 +480,44 @@ def main() -> None:
     for module in backbone_modules[: 3 * args.freeze_backbone_blocks]:
         for parameter in module.parameters():
             parameter.requires_grad_(False)
-    backbone_parameters = [
-        parameter for parameter in model.backbone.parameters() if parameter.requires_grad
-    ]
-    parameter_groups = [{"params": model.output.parameters(), "lr": args.learning_rate}]
-    if backbone_parameters:
-        parameter_groups.insert(
-            0,
+    context_adapter_weight = None
+    frozen_base_columns = None
+    if args.context_adapter_only:
+        context_adapter_weight, frozen_base_columns = (
+            configure_context_adapter_only(model)
+        )
+        backbone_parameters = [context_adapter_weight]
+        parameter_groups = [
             {
                 "params": backbone_parameters,
-                "lr": args.learning_rate * args.backbone_learning_rate_scale,
-            },
-        )
+                "lr": args.learning_rate,
+            }
+        ]
+    else:
+        backbone_parameters = [
+            parameter
+            for parameter in model.backbone.parameters()
+            if parameter.requires_grad
+        ]
+        parameter_groups = [
+            {
+                "params": [
+                    parameter
+                    for parameter in model.output.parameters()
+                    if parameter.requires_grad
+                ],
+                "lr": args.learning_rate,
+            }
+        ]
+        if backbone_parameters:
+            parameter_groups.insert(
+                0,
+                {
+                    "params": backbone_parameters,
+                    "lr": args.learning_rate
+                    * args.backbone_learning_rate_scale,
+                },
+            )
     optimizer = torch.optim.AdamW(
         parameter_groups,
         lr=args.learning_rate,
@@ -358,6 +537,10 @@ def main() -> None:
         "loss_weights": loss_weights,
         "sampling": sampling_summary,
         "target_contract": target_contract,
+        "input_dim": train_data.input_dim,
+        "input_contract": train_data.input_contract,
+        "input_features": train_data.input_features,
+        "zero_input_features": zero_input_features,
     }
     (args.output / "run_config.json").write_text(
         json.dumps(run_config, indent=2),
@@ -394,6 +577,11 @@ def main() -> None:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
+            if context_adapter_weight is not None:
+                restore_context_adapter_base_columns(
+                    context_adapter_weight,
+                    frozen_base_columns,
+                )
             batch_weight = float(training_weight.sum())
             train_total += float(loss.detach()) * batch_weight
             train_denominator += batch_weight
@@ -420,6 +608,9 @@ def main() -> None:
             "model": model.state_dict(),
             "hidden_dim": args.hidden_dim,
             "layers": args.layers,
+            "input_dim": train_data.input_dim,
+            "input_contract": train_data.input_contract,
+            "input_features": train_data.input_features,
             "stage": args.stage,
             "epoch": epoch,
             "metrics": row,

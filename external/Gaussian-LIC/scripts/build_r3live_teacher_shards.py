@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build 24D -> 14D distillation shards from an exported R3LIVE Teacher."""
+"""Build context-versioned input -> 14D shards from an R3LIVE Teacher."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from pathlib import Path
 
 import numpy as np
 from plyfile import PlyData
+
+from semantic_gaussian_prior_model import SEMANTIC_CONFIDENCE_INDEX
 
 
 C0 = 0.28209479177387814
@@ -22,6 +24,19 @@ def field(vertex, name: str) -> np.ndarray:
 
 def inverse_tanh(value: np.ndarray) -> np.ndarray:
     return np.arctanh(np.clip(value, -0.999, 0.999)).astype(np.float32)
+
+
+def teacher_sample_weight(
+    inputs: np.ndarray,
+    final_opacity: np.ndarray,
+) -> np.ndarray:
+    confidence = np.clip(
+        inputs[:, SEMANTIC_CONFIDENCE_INDEX],
+        0.1,
+        1.0,
+    )
+    visibility = 1.0 / (1.0 + np.exp(-final_opacity[:, 0]))
+    return (confidence * visibility).astype(np.float32)
 
 
 def main() -> None:
@@ -86,9 +101,7 @@ def main() -> None:
     rotation_norm = np.linalg.norm(final_rotation, axis=1, keepdims=True).clip(1e-6)
     target[:, 6:10] = final_rotation / rotation_norm
     target[:, 13:14] = np.clip(final_opacity - base_opacity, -2.0, 2.0)
-    confidence = np.clip(inputs[:, -1], 0.1, 1.0)
-    visibility = 1.0 / (1.0 + np.exp(-final_opacity[:, 0]))
-    weight = (confidence * visibility).astype(np.float32)
+    weight = teacher_sample_weight(inputs, final_opacity)
     finite = (
         np.isfinite(inputs).all(axis=1)
         & np.isfinite(target).all(axis=1)

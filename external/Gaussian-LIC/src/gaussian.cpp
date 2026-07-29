@@ -681,6 +681,12 @@ void Dataset::addFrame(Frame& cur_frame)
     cv::Mat depth_map = dp_ptr->image;  // metric float32
     const int width = image_rgb.cols;
     const int height = image_rgb.rows;
+    cv::Mat image_gray;
+    if (semantic_gaussian_prior_input_dim_ == PRIOR_CONTEXT_INPUT_DIM &&
+        !semantic_gaussian_prior_lightweight_context_)
+    {
+        cv::cvtColor(image_rgb, image_gray, cv::COLOR_RGB2GRAY);
+    }
 
     auto initializeSemanticSpace = [&](int64_t source_dim)
     {
@@ -1112,6 +1118,90 @@ void Dataset::addFrame(Frame& cur_frame)
     frame_depth_weights_.push_back(depth_weight);
     frame_geometry_weights_.push_back(geometry_weight);
     frame_pose_weights_.push_back(pose_weight);
+    auto sampleSobel = [](const cv::Mat& image, int x, int y)
+    {
+        const bool interior =
+            x > 0 && x + 1 < image.cols && y > 0 && y + 1 < image.rows;
+        const int x0 = interior
+            ? x - 1
+            : cv::borderInterpolate(x - 1, image.cols, cv::BORDER_DEFAULT);
+        const int x2 = interior
+            ? x + 1
+            : cv::borderInterpolate(x + 1, image.cols, cv::BORDER_DEFAULT);
+        const int y0 = interior
+            ? y - 1
+            : cv::borderInterpolate(y - 1, image.rows, cv::BORDER_DEFAULT);
+        const int y2 = interior
+            ? y + 1
+            : cv::borderInterpolate(y + 1, image.rows, cv::BORDER_DEFAULT);
+        const float* row0 = image.ptr<float>(y0);
+        const float* row1 = image.ptr<float>(y);
+        const float* row2 = image.ptr<float>(y2);
+        const float left =
+            row0[x0] + 2.0f * row1[x0] + row2[x0];
+        const float right =
+            row0[x2] + 2.0f * row1[x2] + row2[x2];
+        const float top =
+            row0[x0] + 2.0f * row0[x] + row0[x2];
+        const float bottom =
+            row2[x0] + 2.0f * row2[x] + row2[x2];
+        return std::make_pair(
+            0.125f * (right - left),
+            0.125f * (bottom - top));
+    };
+    auto appendPriorContext = [&](double u, double v, float point_depth)
+    {
+        std::array<float, PRIOR_FRAME_CONTEXT_DIM> context{};
+        if (semantic_gaussian_prior_input_dim_ != PRIOR_CONTEXT_INPUT_DIM)
+        {
+            return;
+        }
+        const float width_scale = static_cast<float>(std::max(1, width - 1));
+        const float height_scale = static_cast<float>(std::max(1, height - 1));
+        context[0] = std::clamp(
+            2.0f * static_cast<float>(u) / width_scale - 1.0f,
+            -1.0f,
+            1.0f);
+        context[1] = std::clamp(
+            2.0f * static_cast<float>(v) / height_scale - 1.0f,
+            -1.0f,
+            1.0f);
+        if (!semantic_gaussian_prior_lightweight_context_ &&
+            u >= 0.0 && u < width && v >= 0.0 && v < height)
+        {
+            const int pixel_x = std::clamp(
+                static_cast<int>(std::lround(u)), 0, width - 1);
+            const int pixel_y = std::clamp(
+                static_cast<int>(std::lround(v)), 0, height - 1);
+            const auto image_gradient =
+                sampleSobel(image_gray, pixel_x, pixel_y);
+            const float image_dx = image_gradient.first;
+            const float image_dy = image_gradient.second;
+            context[2] = std::clamp(image_dx, -1.0f, 1.0f);
+            context[3] = std::clamp(image_dy, -1.0f, 1.0f);
+            context[4] = std::clamp(
+                std::sqrt(image_dx * image_dx + image_dy * image_dy),
+                0.0f,
+                1.0f);
+
+            const float safe_depth = std::max(point_depth, 0.1f);
+            const auto depth_gradient =
+                sampleSobel(depth_map, pixel_x, pixel_y);
+            const float depth_dx = depth_gradient.first / safe_depth;
+            const float depth_dy = depth_gradient.second / safe_depth;
+            context[5] = std::clamp(depth_dx, -1.0f, 1.0f);
+            context[6] = std::clamp(depth_dy, -1.0f, 1.0f);
+            context[7] = std::clamp(
+                std::sqrt(depth_dx * depth_dx + depth_dy * depth_dy),
+                0.0f,
+                1.0f);
+        }
+        context[8] = rgb_weight;
+        context[9] = depth_weight;
+        context[10] = geometry_weight;
+        context[11] = pose_weight;
+        pointprior_context_.push_back(context);
+    };
 
     /// point
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
@@ -1128,6 +1218,7 @@ void Dataset::addFrame(Frame& cur_frame)
         const double u = fx_ * pt_c(0) / pt_c(2) + cx_;
         const double v = fy_ * pt_c(1) / pt_c(2) + cy_;
         appendPointSemantic(u, v);
+        appendPriorContext(u, v, static_cast<float>(pt_c(2)));
     }
 
     /// train & test
@@ -1184,6 +1275,7 @@ void Dataset::addFrame(Frame& cur_frame)
                     pointcolor_.emplace_back(eigen_color);
                     pointdepth_.emplace_back(static_cast<float>(depth));
                     appendPointSemantic(u, v);
+                    appendPriorContext(u, v, depth);
                 }
             }
             else
@@ -1237,6 +1329,12 @@ void Dataset::addFrame(Frame& cur_frame)
 
     all_frame_num_ += 1;
 
+    if (semantic_gaussian_prior_input_dim_ == PRIOR_CONTEXT_INPUT_DIM &&
+        pointprior_context_.size() != pointcloud_.size())
+    {
+        throw std::runtime_error(
+            "Dataset point/Prior-context alignment invariant failed after addFrame");
+    }
     if (semantic_dim_ > 0)
     {
         const std::size_t point_count = pointcloud_.size();
@@ -1256,6 +1354,7 @@ void Dataset::clearPendingPoints()
     pointcloud_.clear();
     pointcolor_.clear();
     pointdepth_.clear();
+    pointprior_context_.clear();
     pointsemantic_memory_index_.clear();
     pointsemantic_confidence_.clear();
     pointsemantic_risk_.clear();
@@ -1325,6 +1424,8 @@ GaussianModel::GaussianModel(const Params& prm)
         prm.teacher_distillation_export_enabled;
     next_teacher_candidate_id_ = 0;
     random_generator_.seed(random_seed_);
+    torch::manual_seed(static_cast<uint64_t>(random_seed_));
+    torch::cuda::manual_seed_all(static_cast<uint64_t>(random_seed_));
 
     apply_exposure_ = prm.apply_exposure;
     exposure_lr_ = prm.exposure_lr;
@@ -1339,6 +1440,20 @@ GaussianModel::GaussianModel(const Params& prm)
         prm.semantic_gaussian_prior_model_path;
     semantic_gaussian_prior_strategy_ =
         prm.semantic_gaussian_prior_strategy;
+    semantic_gaussian_prior_input_dim_ =
+        prm.semantic_gaussian_prior_input_dim;
+    semantic_gaussian_prior_context_gain_ = static_cast<float>(
+        std::clamp(prm.semantic_gaussian_prior_context_gain, 0.0, 1.0));
+    semantic_gaussian_prior_exact_spacing_ =
+        prm.semantic_gaussian_prior_exact_spacing;
+    semantic_gaussian_prior_lightweight_context_ =
+        prm.semantic_gaussian_prior_lightweight_context;
+    if (semantic_gaussian_prior_input_dim_ != PRIOR_BASE_INPUT_DIM &&
+        semantic_gaussian_prior_input_dim_ != PRIOR_CONTEXT_INPUT_DIM)
+    {
+        throw std::runtime_error(
+            "Semantic Gaussian prior input dimension must be 24 or 38");
+    }
     if (semantic_gaussian_prior_strategy_ != "full" &&
         semantic_gaussian_prior_strategy_ != "geometry_only" &&
         semantic_gaussian_prior_strategy_ != "appearance_only")
@@ -1369,9 +1484,36 @@ GaussianModel::GaussianModel(const Params& prm)
                 torch::jit::load(semantic_gaussian_prior_model_path_));
         semantic_gaussian_prior_model_->to(torch::kCUDA);
         semantic_gaussian_prior_model_->eval();
+        {
+            torch::NoGradGuard no_grad;
+            auto probe = torch::zeros(
+                {1, semantic_gaussian_prior_input_dim_},
+                torch::TensorOptions()
+                    .device(torch::kCUDA)
+                    .dtype(torch::kFloat32));
+            auto probe_output =
+                semantic_gaussian_prior_model_->forward({probe}).toTensor();
+            if (probe_output.dim() != 2 ||
+                probe_output.size(0) != 1 ||
+                probe_output.size(1) != 14 ||
+                !torch::isfinite(probe_output).all().item<bool>())
+            {
+                throw std::runtime_error(
+                    "Semantic Gaussian prior failed its startup contract check");
+            }
+        }
         std::cout << "[Semantic Gaussian Prior] loaded "
                   << semantic_gaussian_prior_model_path_
                   << ", strategy=" << semantic_gaussian_prior_strategy_
+                  << ", input_dim=" << semantic_gaussian_prior_input_dim_
+                  << ", context_gain="
+                  << semantic_gaussian_prior_context_gain_
+                  << ", exact_spacing="
+                  << (semantic_gaussian_prior_exact_spacing_ ? "true" : "false")
+                  << ", lightweight_context="
+                  << (semantic_gaussian_prior_lightweight_context_
+                          ? "true"
+                          : "false")
                   << ", residual_optimization_iters="
                   << residual_optimization_iters_ << std::endl;
     }
@@ -1381,7 +1523,8 @@ GaussianModel::GaussianModel(const Params& prm)
     gaussian_candidate_id_ = torch::empty(
         {0}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt32));
     teacher_candidate_inputs_ = torch::empty(
-        {0, 24}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
+        {0, semantic_gaussian_prior_input_dim_},
+        torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
     teacher_candidate_base_scaling_ = torch::empty(
         {0, 3}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
     teacher_candidate_base_opacity_ = torch::empty(
@@ -1431,6 +1574,72 @@ GaussianModel::GaussianModel(const Params& prm)
     prior_forward_candidates_ = 0;
 }
 
+torch::Tensor GaussianModel::buildSemanticGaussianPriorInput(
+    const torch::Tensor& base_xyz,
+    const torch::Tensor& base_rgb,
+    const torch::Tensor& depth,
+    const torch::Tensor& object_latent,
+    const torch::Tensor& confidence,
+    const torch::Tensor& prior_context,
+    torch::DeviceType device_type) const
+{
+    const int64_t rows = base_xyz.size(0);
+    torch::Tensor effective_latent = object_latent;
+    torch::Tensor effective_confidence = confidence;
+    if (!effective_latent.defined() || effective_latent.dim() != 2 ||
+        effective_latent.size(0) != rows ||
+        effective_latent.size(1) != 16)
+    {
+        effective_latent = torch::zeros(
+            {rows, 16},
+            torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
+    }
+    if (!effective_confidence.defined() || effective_confidence.dim() != 1 ||
+        effective_confidence.size(0) != rows)
+    {
+        effective_confidence = torch::zeros(
+            {rows},
+            torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
+    }
+
+    auto input = torch::cat(
+        {
+            torch::tanh(
+                base_xyz.detach().to(device_type).to(torch::kFloat32) / 50.0f),
+            base_rgb.detach().to(device_type).to(torch::kFloat32)
+                .clamp(0.0f, 1.0f),
+            torch::log1p(
+                depth.detach().to(device_type).to(torch::kFloat32)
+                    .clamp_min(0.0f)).unsqueeze(1),
+            effective_latent.detach().to(device_type).to(torch::kFloat32),
+            effective_confidence.detach().to(device_type).to(torch::kFloat32)
+                .clamp(0.0f, 1.0f).unsqueeze(1),
+        },
+        1);
+    if (semantic_gaussian_prior_input_dim_ == PRIOR_CONTEXT_INPUT_DIM)
+    {
+        if (!prior_context.defined() || prior_context.dim() != 2 ||
+            prior_context.size(0) != rows ||
+            prior_context.size(1) != PRIOR_CONTEXT_FEATURE_DIM)
+        {
+            throw std::runtime_error(
+                "Contextual Semantic Gaussian Prior expects [N,14] context");
+        }
+        input = torch::cat(
+            {
+                input,
+                prior_context.detach().to(device_type).to(torch::kFloat32),
+            },
+            1);
+    }
+    if (input.size(1) != semantic_gaussian_prior_input_dim_)
+    {
+        throw std::runtime_error(
+            "Semantic Gaussian Prior input contract was assembled incorrectly");
+    }
+    return input.contiguous();
+}
+
 bool GaussianModel::applySemanticGaussianPrior(
     const torch::Tensor& base_xyz,
     const torch::Tensor& base_rgb,
@@ -1438,6 +1647,7 @@ bool GaussianModel::applySemanticGaussianPrior(
     float focal,
     const torch::Tensor& object_latent,
     const torch::Tensor& confidence,
+    const torch::Tensor& prior_context,
     torch::Tensor& prior_xyz,
     torch::Tensor& prior_features_dc,
     torch::Tensor& prior_scaling,
@@ -1449,33 +1659,26 @@ bool GaussianModel::applySemanticGaussianPrior(
         return false;
     }
     torch::NoGradGuard no_grad;
-    torch::Tensor effective_latent = object_latent;
-    torch::Tensor effective_confidence = confidence;
-    if (!effective_latent.defined() || effective_latent.dim() != 2 ||
-        effective_latent.size(0) != base_xyz.size(0) ||
-        effective_latent.size(1) != 16)
-    {
-        effective_latent = torch::zeros(
-            {base_xyz.size(0), 16},
-            torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
-    }
-    if (!effective_confidence.defined() || effective_confidence.dim() != 1 ||
-        effective_confidence.size(0) != base_xyz.size(0))
-    {
-        effective_confidence = torch::zeros(
-            {base_xyz.size(0)},
-            torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
-    }
     const auto prior_start = std::chrono::steady_clock::now();
-    auto xyz_input = torch::tanh(base_xyz.detach() / 50.0f);
-    auto rgb_input = base_rgb.detach().clamp(0.0f, 1.0f);
-    auto depth_input = torch::log1p(depth.detach().clamp_min(0.0f)).unsqueeze(1);
-    auto latent_input = effective_latent.detach()
-        .to(torch::kCUDA).to(torch::kFloat32);
-    auto confidence_input = effective_confidence.detach()
-        .to(torch::kCUDA).to(torch::kFloat32).clamp(0.0f, 1.0f).unsqueeze(1);
-    auto input = torch::cat(
-        {xyz_input, rgb_input, depth_input, latent_input, confidence_input}, 1);
+    auto input = buildSemanticGaussianPriorInput(
+        base_xyz,
+        base_rgb,
+        depth,
+        object_latent,
+        confidence,
+        prior_context,
+        torch::kCUDA);
+    if (semantic_gaussian_prior_input_dim_ == PRIOR_CONTEXT_INPUT_DIM &&
+        semantic_gaussian_prior_context_gain_ != 1.0f)
+    {
+        auto context = input.index({
+            torch::indexing::Slice(),
+            torch::indexing::Slice(
+                PRIOR_BASE_INPUT_DIM,
+                PRIOR_CONTEXT_INPUT_DIM),
+        });
+        context.mul_(semantic_gaussian_prior_context_gain_);
+    }
     auto output = semantic_gaussian_prior_model_->forward({input}).toTensor();
     if (output.dim() != 2 || output.size(0) != base_xyz.size(0) ||
         output.size(1) != 14)
@@ -1546,6 +1749,7 @@ torch::Tensor GaussianModel::registerTeacherCandidates(
     float focal,
     const torch::Tensor& object_latent,
     const torch::Tensor& confidence,
+    const torch::Tensor& prior_context,
     const torch::Tensor& base_scaling,
     const torch::Tensor& base_opacity)
 {
@@ -1556,38 +1760,14 @@ torch::Tensor GaussianModel::registerTeacherCandidates(
             {rows}, -1,
             torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt32));
     }
-    auto latent = torch::zeros(
-        {rows, 16},
-        torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
-    if (object_latent.defined() && object_latent.dim() == 2 &&
-        object_latent.size(0) == rows && object_latent.size(1) > 0)
-    {
-        const int64_t copied = std::min<int64_t>(16, object_latent.size(1));
-        latent.index_put_(
-            {torch::indexing::Slice(), torch::indexing::Slice(0, copied)},
-            object_latent.detach().to(torch::kCPU).to(torch::kFloat32).index({
-                torch::indexing::Slice(), torch::indexing::Slice(0, copied)}));
-    }
-    auto confidence_cpu = torch::zeros(
-        {rows, 1},
-        torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
-    if (confidence.defined() && confidence.dim() == 1 &&
-        confidence.size(0) == rows)
-    {
-        confidence_cpu.copy_(
-            confidence.detach().to(torch::kCPU).to(torch::kFloat32)
-                .clamp(0.0f, 1.0f).unsqueeze(1));
-    }
-    auto inputs = torch::cat(
-        {
-            torch::tanh(base_xyz.detach().to(torch::kCPU).to(torch::kFloat32) / 50.0f),
-            base_rgb.detach().to(torch::kCPU).to(torch::kFloat32).clamp(0.0f, 1.0f),
-            torch::log1p(depth.detach().to(torch::kCPU).to(torch::kFloat32)
-                             .clamp_min(0.0f)).unsqueeze(1),
-            latent,
-            confidence_cpu,
-        },
-        1).contiguous();
+    auto inputs = buildSemanticGaussianPriorInput(
+        base_xyz,
+        base_rgb,
+        depth,
+        object_latent,
+        confidence,
+        prior_context,
+        torch::kCPU);
     auto ids = torch::arange(
         next_teacher_candidate_id_,
         next_teacher_candidate_id_ + rows,
@@ -2046,6 +2226,54 @@ void GaussianModel::debugPrintSemanticBundleStats(int stats_dim) const
     std::cout << finite_oss.str() << std::endl;
 }
 
+torch::Tensor buildCandidatePriorContext(
+    const torch::Tensor& frame_context,
+    const torch::Tensor& xyz,
+    const torch::Tensor& depth,
+    float focal,
+    float scaling_scale,
+    const torch::Tensor& uncovered_fraction,
+    bool exact_spacing_enabled)
+{
+    const int64_t rows = xyz.size(0);
+    if (!frame_context.defined() || frame_context.dim() != 2 ||
+        frame_context.size(0) != rows ||
+        frame_context.size(1) != PRIOR_FRAME_CONTEXT_DIM)
+    {
+        throw std::runtime_error(
+            "Prior frame context must have shape [N,12]");
+    }
+    if (!uncovered_fraction.defined() ||
+        uncovered_fraction.dim() != 1 ||
+        uncovered_fraction.size(0) != rows)
+    {
+        throw std::runtime_error(
+            "Prior uncovered fraction must have shape [N]");
+    }
+    auto device = xyz.device();
+    auto spacing_feature = torch::zeros(
+        {rows},
+        torch::TensorOptions().device(device).dtype(torch::kFloat32));
+    if (exact_spacing_enabled && rows > 1)
+    {
+        auto nearest_distance = torch::sqrt(
+            torch::clamp_min(distCUDA2(xyz.detach().contiguous()), 1e-12f));
+        auto base_linear_scale =
+            scaling_scale * depth.detach().to(device).to(torch::kFloat32)
+                .clamp_min(1e-4f) / focal;
+        spacing_feature = torch::tanh(torch::log1p(
+            nearest_distance / base_linear_scale.clamp_min(1e-6f)));
+    }
+    return torch::cat(
+        {
+            frame_context.detach().to(device).to(torch::kFloat32),
+            uncovered_fraction.detach().to(device).to(torch::kFloat32)
+                .clamp(0.0f, 1.0f).unsqueeze(1),
+            spacing_feature.unsqueeze(1),
+        },
+        1).contiguous();
+}
+
 void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
 {
     /// foreground
@@ -2057,7 +2285,6 @@ void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
     torch::Tensor scales = torch::zeros({num}, torch::kFloat32).cuda();
     torch::Tensor base_rgb = torch::zeros({num, 3}, torch::kFloat32).cuda();
     torch::Tensor foreground_depth = torch::zeros({num}, torch::kFloat32).cuda();
-
     double f = (dataset->fx_ + dataset->fy_) / 2;
     for (int i = 0; i < num; ++i) 
     {
@@ -2083,6 +2310,32 @@ void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
     torch::Tensor opacities = general_utils::inverse_sigmoid(0.1f * torch::ones({num, 1}, torch::kFloat32).cuda());  // (n, 1)
     torch::Tensor initial_object_latent;
     torch::Tensor initial_confidence;
+    torch::Tensor initial_prior_context;
+    if (semantic_gaussian_prior_input_dim_ == PRIOR_CONTEXT_INPUT_DIM)
+    {
+        if (dataset->pointprior_context_.size() !=
+            static_cast<std::size_t>(num))
+        {
+            throw std::runtime_error(
+                "Initial points and Prior frame context are not aligned");
+        }
+        auto frame_context = torch::from_blob(
+            dataset->pointprior_context_.front().data(),
+            {num, PRIOR_FRAME_CONTEXT_DIM},
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU)
+        ).clone().to(torch::kCUDA);
+        initial_prior_context = buildCandidatePriorContext(
+            frame_context,
+            fused_point_cloud,
+            foreground_depth,
+            static_cast<float>(f),
+            static_cast<float>(scaling_scale_),
+            torch::ones(
+                {num},
+                torch::TensorOptions().dtype(torch::kFloat32)
+                    .device(torch::kCUDA)),
+            semantic_gaussian_prior_exact_spacing_);
+    }
     if (dataset->semantic_dim_ > 0 &&
         dataset->pointsemantic_memory_index_.size() ==
             static_cast<std::size_t>(num))
@@ -2113,6 +2366,7 @@ void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
             static_cast<float>(f),
             initial_object_latent,
             initial_confidence,
+            initial_prior_context,
             fused_point_cloud,
             prior_features_dc,
             scales,
@@ -2133,6 +2387,7 @@ void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
         static_cast<float>(f),
         initial_object_latent,
         initial_confidence,
+        initial_prior_context,
         scales,
         opacities);
 
@@ -2141,9 +2396,21 @@ void GaussianModel::initialize(const std::shared_ptr<Dataset>& dataset)
     {
         int num = skybox_points_num_;
         double radius = skybox_radius_;
-        torch::Tensor pi = torch::acos(torch::tensor(-1.0, torch::kFloat32).cuda());
-        torch::Tensor theta = 2.0 * pi * torch::rand({num}, torch::kFloat32).cuda();
-        torch::Tensor phi = torch::acos(1.0 - 1.4 * torch::rand({num}, torch::kFloat32).cuda());
+        std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
+        const float pi = std::acos(-1.0f);
+        std::vector<float> theta_values(num);
+        std::vector<float> phi_values(num);
+        for (int index = 0; index < num; ++index)
+        {
+            theta_values[index] =
+                2.0f * pi * uniform(random_generator_);
+            phi_values[index] =
+                std::acos(1.0f - 1.4f * uniform(random_generator_));
+        }
+        torch::Tensor theta = torch::from_blob(
+            theta_values.data(), {num}, torch::kFloat32).to(torch::kCUDA);
+        torch::Tensor phi = torch::from_blob(
+            phi_values.data(), {num}, torch::kFloat32).to(torch::kCUDA);
         torch::Tensor sky_fused_point_cloud = torch::zeros({num, 3}, torch::kFloat32).cuda();
         sky_fused_point_cloud.index({torch::indexing::Slice(), 0}) = radius * 10 * torch::cos(theta) * torch::sin(phi);
         sky_fused_point_cloud.index({torch::indexing::Slice(), 1}) = radius * 10 * torch::sin(theta) * torch::sin(phi);
@@ -2551,7 +2818,23 @@ void GaussianModel::saveTeacherDistillationSidecar(
          << "  \"candidate_rows\": " << teacher_candidate_inputs_.size(0) << ",\n"
          << "  \"final_rows\": "
          << gaussian_candidate_id_.size(0) - skybox_points_num_ << ",\n"
-         << "  \"input_dims\": 24,\n"
+         << "  \"input_dims\": " << semantic_gaussian_prior_input_dim_ << ",\n"
+         << "  \"input_contract\": \""
+         << (semantic_gaussian_prior_input_dim_ == PRIOR_CONTEXT_INPUT_DIM
+                 ? "context_v4"
+                 : "base_v3")
+         << "\",\n"
+         << "  \"context_dims\": "
+         << (semantic_gaussian_prior_input_dim_ - PRIOR_BASE_INPUT_DIM)
+         << ",\n"
+         << "  \"context_gain\": "
+         << semantic_gaussian_prior_context_gain_ << ",\n"
+         << "  \"exact_spacing\": "
+         << (semantic_gaussian_prior_exact_spacing_ ? "true" : "false")
+         << ",\n"
+         << "  \"lightweight_context\": "
+         << (semantic_gaussian_prior_lightweight_context_ ? "true" : "false")
+         << ",\n"
          << "  \"scaling_space\": \"log\",\n"
          << "  \"opacity_space\": \"logit\"\n"
          << "}\n";
@@ -2904,6 +3187,12 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     auto rendered_alpha = 1 - std::get<2>(render_pkg).squeeze(0);
 
     int n = dataset->pointcloud_.size();
+    if (n == 0)
+    {
+        std::cout << "\033[1;32m Insert 0.00k GS,\033[0m";
+        dataset->clearPendingPoints();
+        return;
+    }
     std::vector<float> float_point(n * 3);
     std::vector<float> float_color(n * 3);
     for (size_t i = 0; i < n; ++i) 
@@ -2922,6 +3211,21 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     torch::Tensor point_semantic_confidence;
     torch::Tensor point_semantic_risk;
     torch::Tensor point_semantic_observation_count;
+    torch::Tensor point_prior_frame_context;
+    if (pc->semantic_gaussian_prior_input_dim_ == PRIOR_CONTEXT_INPUT_DIM &&
+        !pc->semantic_gaussian_prior_lightweight_context_)
+    {
+        if (dataset->pointprior_context_.size() != static_cast<std::size_t>(n))
+        {
+            throw std::runtime_error(
+                "Pending points and Prior frame context are not aligned");
+        }
+        point_prior_frame_context = torch::from_blob(
+            dataset->pointprior_context_.front().data(),
+            {n, PRIOR_FRAME_CONTEXT_DIM},
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU)
+        ).to(torch::kCUDA);
+    }
     if (dataset->semantic_dim_ > 0)
     {
         if (dataset->pointsemantic_memory_index_.size() !=
@@ -3025,6 +3329,12 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
         point_semantic_risk.index_select(0, keep_indices_tensor_cpu);
     auto filtered_semantic_observation_count =
         point_semantic_observation_count.index_select(0, keep_indices_tensor_cpu);
+    torch::Tensor filtered_prior_frame_context;
+    if (point_prior_frame_context.defined())
+    {
+        filtered_prior_frame_context =
+            point_prior_frame_context.index_select(0, keep_indices_tensor);
+    }
 
     int H = viewpoint_cam->image_height_, W = viewpoint_cam->image_width_;
     auto filter = [H, W, &rendered_alpha](const torch::Tensor& points, 
@@ -3052,8 +3362,16 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
 
     // auto filtered_pkg = filter(points, colors, depths_in_rsp_frame, pixels);
     auto filtered_pkg = filter(filtered_points, filtered_colors, filtered_depths_in_rsp_frame, filtered_pixels);
-    float latest_geometry_weight = dataset->frame_geometry_weights_.empty() ? 1.0f : clamp_weight(dataset->frame_geometry_weights_.back(), 0.15f, 1.0f);
-    float latest_pose_weight = dataset->frame_pose_weights_.empty() ? 1.0f : clamp_weight(dataset->frame_pose_weights_.back(), 0.15f, 1.0f);
+    float latest_rgb_weight = dataset->frame_rgb_weights_.empty()
+        ? 1.0f : clamp_weight(dataset->frame_rgb_weights_.back());
+    float latest_depth_weight = dataset->frame_depth_weights_.empty()
+        ? 1.0f : clamp_weight(dataset->frame_depth_weights_.back());
+    float latest_geometry_weight = dataset->frame_geometry_weights_.empty()
+        ? 1.0f
+        : clamp_weight(dataset->frame_geometry_weights_.back(), 0.15f, 1.0f);
+    float latest_pose_weight = dataset->frame_pose_weights_.empty()
+        ? 1.0f
+        : clamp_weight(dataset->frame_pose_weights_.back(), 0.15f, 1.0f);
     float keep_ratio = 1.0f;
     if (pc->dynamic_geometry_capacity_)
     {
@@ -3064,7 +3382,15 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     torch::Tensor fused_rgb = std::get<1>(filtered_pkg);
     torch::Tensor fused_color = RGB2SH(fused_rgb);
     torch::Tensor filtered_depth_tensor = std::get<2>(filtered_pkg);
-    auto valid_semantic_mask = std::get<3>(filtered_pkg).to(torch::kCPU);
+    auto valid_mask = std::get<3>(filtered_pkg);
+    auto valid_semantic_mask = valid_mask.to(torch::kCPU);
+    filtered_pixels = filtered_pixels.index({
+        valid_semantic_mask.to(filtered_pixels.device())});
+    if (filtered_prior_frame_context.defined())
+    {
+        filtered_prior_frame_context =
+            filtered_prior_frame_context.index({valid_mask});
+    }
     filtered_semantic_memory_index =
         filtered_semantic_memory_index.index({valid_semantic_mask});
     filtered_semantic_confidence =
@@ -3075,8 +3401,27 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
         filtered_semantic_observation_count.index({valid_semantic_mask});
     if (fused_point_cloud.size(0) > 0 && keep_ratio < 0.999f)
     {
-        auto keep_mask = torch::rand({fused_point_cloud.size(0)}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)) < keep_ratio;
-        if (keep_mask.sum().item<int>() > 0)
+        const int64_t candidate_count = fused_point_cloud.size(0);
+        std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
+        std::vector<uint8_t> keep_values(candidate_count);
+        int64_t kept_count = 0;
+        for (int64_t index = 0; index < candidate_count; ++index)
+        {
+            keep_values[index] =
+                uniform(pc->random_generator_) < keep_ratio ? 1 : 0;
+            kept_count += keep_values[index];
+        }
+        if (kept_count == 0)
+        {
+            keep_values[0] = 1;
+            kept_count = 1;
+        }
+        auto keep_mask = torch::from_blob(
+            keep_values.data(),
+            {candidate_count},
+            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU)
+        ).to(torch::kCUDA).to(torch::kBool);
+        if (kept_count > 0)
         {
             fused_point_cloud = fused_point_cloud.index({keep_mask, torch::indexing::Slice()});
             fused_rgb = fused_rgb.index({keep_mask, torch::indexing::Slice()});
@@ -3091,6 +3436,12 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
                 filtered_semantic_risk.index({keep_mask_cpu});
             filtered_semantic_observation_count =
                 filtered_semantic_observation_count.index({keep_mask_cpu});
+            filtered_pixels = filtered_pixels.index({keep_mask});
+            if (filtered_prior_frame_context.defined())
+            {
+                filtered_prior_frame_context =
+                    filtered_prior_frame_context.index({keep_mask});
+            }
         }
     }
 
@@ -3122,6 +3473,64 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     {
         filtered_semantic_memory_index = torch::Tensor();
     }
+    torch::Tensor prior_context;
+    if (pc->semantic_gaussian_prior_input_dim_ == PRIOR_CONTEXT_INPUT_DIM)
+    {
+        torch::Tensor candidate_frame_context =
+            filtered_prior_frame_context;
+        if (pc->semantic_gaussian_prior_lightweight_context_)
+        {
+            candidate_frame_context = torch::zeros(
+                {num, PRIOR_FRAME_CONTEXT_DIM},
+                torch::TensorOptions()
+                    .dtype(torch::kFloat32)
+                    .device(torch::kCUDA));
+            const float width_scale =
+                static_cast<float>(std::max(1, W - 1));
+            const float height_scale =
+                static_cast<float>(std::max(1, H - 1));
+            candidate_frame_context.index_put_(
+                {torch::indexing::Slice(), 0},
+                (
+                    2.0f * filtered_pixels.index({
+                        torch::indexing::Slice(), 0}).to(torch::kFloat32)
+                    / width_scale - 1.0f
+                ).clamp(-1.0f, 1.0f));
+            candidate_frame_context.index_put_(
+                {torch::indexing::Slice(), 1},
+                (
+                    2.0f * filtered_pixels.index({
+                        torch::indexing::Slice(), 1}).to(torch::kFloat32)
+                    / height_scale - 1.0f
+                ).clamp(-1.0f, 1.0f));
+            candidate_frame_context.index_put_(
+                {torch::indexing::Slice(), 8},
+                latest_rgb_weight);
+            candidate_frame_context.index_put_(
+                {torch::indexing::Slice(), 9},
+                latest_depth_weight);
+            candidate_frame_context.index_put_(
+                {torch::indexing::Slice(), 10},
+                latest_geometry_weight);
+            candidate_frame_context.index_put_(
+                {torch::indexing::Slice(), 11},
+                latest_pose_weight);
+        }
+        auto context_x = filtered_pixels.index({
+            torch::indexing::Slice(), 0}).to(torch::kLong);
+        auto context_y = filtered_pixels.index({
+            torch::indexing::Slice(), 1}).to(torch::kLong);
+        auto uncovered_fraction =
+            1.0f - rendered_alpha.index({context_y, context_x});
+        prior_context = buildCandidatePriorContext(
+            candidate_frame_context,
+            fused_point_cloud,
+            filtered_depth_tensor,
+            focal,
+            static_cast<float>(pc->scaling_scale_),
+            uncovered_fraction,
+            pc->semantic_gaussian_prior_exact_spacing_);
+    }
     auto new_candidate_ids = pc->registerTeacherCandidates(
         fused_point_cloud,
         fused_rgb,
@@ -3129,6 +3538,7 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
         focal,
         filtered_semantic_features,
         filtered_semantic_confidence,
+        prior_context,
         scales,
         opacities);
     const bool prior_applied = pc->applySemanticGaussianPrior(
@@ -3138,6 +3548,7 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
         focal,
         filtered_semantic_features,
         filtered_semantic_confidence,
+        prior_context,
         fused_point_cloud,
         features_dc,
         scales,

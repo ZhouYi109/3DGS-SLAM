@@ -8,20 +8,69 @@ from torch import nn
 from torch.nn import functional as F
 
 
-INPUT_DIM = 24
+BASE_INPUT_DIM = 24
+CONTEXT_INPUT_DIM = 38
+SUPPORTED_INPUT_DIMS = (BASE_INPUT_DIM, CONTEXT_INPUT_DIM)
+INPUT_DIM = BASE_INPUT_DIM
 OUTPUT_DIM = 14
 OBJECT_LATENT_DIM = 16
+OBJECT_LATENT_START_INDEX = 7
+OBJECT_LATENT_END_INDEX = OBJECT_LATENT_START_INDEX + OBJECT_LATENT_DIM
+BASE_FEATURE_NAMES = (
+    "xyz_tanh_x",
+    "xyz_tanh_y",
+    "xyz_tanh_z",
+    "rgb_r",
+    "rgb_g",
+    "rgb_b",
+    "log1p_depth",
+    *(f"object_latent_{index:02d}" for index in range(OBJECT_LATENT_DIM)),
+    "semantic_confidence",
+)
+SEMANTIC_CONFIDENCE_INDEX = BASE_FEATURE_NAMES.index("semantic_confidence")
+CONTEXT_FEATURE_NAMES = (
+    "pixel_u_normalized",
+    "pixel_v_normalized",
+    "rgb_gradient_x",
+    "rgb_gradient_y",
+    "rgb_gradient_magnitude",
+    "relative_depth_gradient_x",
+    "relative_depth_gradient_y",
+    "relative_depth_gradient_magnitude",
+    "appearance_reliability",
+    "depth_reliability",
+    "geometry_reliability",
+    "pose_reliability",
+    "uncovered_fraction",
+    "tanh_log1p_spacing_over_scale",
+)
+
+
+def input_contract(input_dim: int) -> tuple[str, tuple[str, ...]]:
+    if input_dim == BASE_INPUT_DIM:
+        return "base_v3", BASE_FEATURE_NAMES
+    if input_dim == CONTEXT_INPUT_DIM:
+        return "context_v4", BASE_FEATURE_NAMES + CONTEXT_FEATURE_NAMES
+    raise ValueError(f"unsupported prior input dimension: {input_dim}")
 
 
 class SemanticGaussianPriorHead(nn.Module):
     """Predict bounded-decoder residuals for one Gaussian candidate."""
 
-    def __init__(self, hidden_dim: int = 64, layers: int = 3) -> None:
+    def __init__(
+        self,
+        hidden_dim: int = 64,
+        layers: int = 3,
+        input_dim: int = INPUT_DIM,
+    ) -> None:
         super().__init__()
         if layers < 2:
             raise ValueError("layers must be at least 2")
+        if input_dim not in SUPPORTED_INPUT_DIMS:
+            raise ValueError(f"unsupported prior input dimension: {input_dim}")
+        self.input_dim = input_dim
         blocks = []
-        in_dim = INPUT_DIM
+        in_dim = input_dim
         for _ in range(layers - 1):
             blocks.extend(
                 [
@@ -40,8 +89,8 @@ class SemanticGaussianPriorHead(nn.Module):
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         # Keep the literal here: TorchScript does not capture module globals.
-        if features.shape[-1] != 24:
-            raise RuntimeError("Semantic Gaussian Prior expects 24 input values")
+        if features.shape[-1] != self.input_dim:
+            raise RuntimeError("Semantic Gaussian Prior input dimension mismatch")
         return self.output(self.backbone(features))
 
 

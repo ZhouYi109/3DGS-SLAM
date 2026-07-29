@@ -10,7 +10,11 @@ from pathlib import Path
 
 import numpy as np
 
-from semantic_gaussian_prior_model import INPUT_DIM, OUTPUT_DIM
+from semantic_gaussian_prior_model import (
+    OUTPUT_DIM,
+    SUPPORTED_INPUT_DIMS,
+    input_contract,
+)
 
 
 def scalar_text(data, key: str) -> str:
@@ -49,12 +53,16 @@ def main() -> None:
             sequence_split.update({name: split for name in selected[split]})
 
     shards = []
+    input_dims = set()
     for path in sorted(args.shard_root.rglob("*.npz")):
         data = np.load(path)
         inputs = data["input"]
         targets = data["target"]
-        if inputs.ndim != 2 or inputs.shape[1] != INPUT_DIM:
-            raise ValueError(f"{path}: expected input [N,{INPUT_DIM}]")
+        if inputs.ndim != 2 or inputs.shape[1] not in SUPPORTED_INPUT_DIMS:
+            raise ValueError(
+                f"{path}: expected input [N,D], D in {SUPPORTED_INPUT_DIMS}"
+            )
+        input_dims.add(int(inputs.shape[1]))
         if targets.shape != (inputs.shape[0], OUTPUT_DIM):
             raise ValueError(f"{path}: expected target [N,{OUTPUT_DIM}]")
         source = scalar_text(data, "source")
@@ -92,6 +100,10 @@ def main() -> None:
         shards.append(shard)
     if not shards:
         raise RuntimeError("no NPZ shards found")
+    if len(input_dims) != 1:
+        raise ValueError(f"inconsistent input dimensions: {sorted(input_dims)}")
+    input_dim = next(iter(input_dims))
+    contract_name, feature_names = input_contract(input_dim)
     r3live_contracts = {
         (shard["target_encoding"], shard["mean_offset_limit"])
         for shard in shards
@@ -103,7 +115,9 @@ def main() -> None:
         )
     payload = {
         "format": "semantic-gaussian-prior-v1",
-        "input_dim": INPUT_DIM,
+        "input_dim": input_dim,
+        "input_contract": contract_name,
+        "input_features": feature_names,
         "output_dim": OUTPUT_DIM,
         "fold": args.fold_name,
         "r3live_target_contract": (

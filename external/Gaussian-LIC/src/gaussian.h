@@ -19,6 +19,7 @@
 #pragma once
 
 #include <memory>
+#include <array>
 #include <string>
 #include <filesystem>
 #include <fstream>
@@ -31,6 +32,7 @@
 
 #include <torch/torch.h>
 #include <torch/script.h>
+#include <torch/cuda.h>
 #include <c10/cuda/CUDACachingAllocator.h>
 
 #include <opencv2/core.hpp>
@@ -51,6 +53,11 @@
 #endif
 
 const double C0 = 0.28209479177387814;
+constexpr int PRIOR_BASE_INPUT_DIM = 24;
+constexpr int PRIOR_CONTEXT_FEATURE_DIM = 14;
+constexpr int PRIOR_CONTEXT_INPUT_DIM =
+    PRIOR_BASE_INPUT_DIM + PRIOR_CONTEXT_FEATURE_DIM;
+constexpr int PRIOR_FRAME_CONTEXT_DIM = 12;
 inline double RGB2SH(double color) {return (color - 0.5) / C0;}
 inline torch::Tensor RGB2SH(torch::Tensor& rgb) {return (rgb - 0.5f) / C0;}
 
@@ -68,6 +75,10 @@ public:
         semantic_memory_similarity_threshold_(
             std::max(0.0, std::min(1.0, prm.semantic_memory_similarity_threshold))),
         semantic_projection_seed_(prm.semantic_projection_seed),
+        semantic_gaussian_prior_input_dim_(
+            prm.semantic_gaussian_prior_input_dim),
+        semantic_gaussian_prior_lightweight_context_(
+            prm.semantic_gaussian_prior_lightweight_context),
         semantic_dim_(0), semantic_compact_dim_(0), semantic_matched_frames_(0),
         semantic_memory_revision_(0),
         all_frame_num_(0), is_keyframe_current_(false)
@@ -96,6 +107,8 @@ public:
     int semantic_compact_dim_config_;
     float semantic_memory_similarity_threshold_;
     int semantic_projection_seed_;
+    int semantic_gaussian_prior_input_dim_;
+    bool semantic_gaussian_prior_lightweight_context_;
     int64_t semantic_dim_;
     int64_t semantic_compact_dim_;
     int64_t semantic_matched_frames_;
@@ -111,6 +124,7 @@ public:
     Eigen::aligned_vector<Eigen::Vector3d> pointcloud_;
     Eigen::aligned_vector<Eigen::Vector3d> pointcolor_;
     std::vector<float> pointdepth_;
+    std::vector<std::array<float, PRIOR_FRAME_CONTEXT_DIM>> pointprior_context_;
     std::vector<int32_t> pointsemantic_memory_index_;
     std::vector<float> pointsemantic_confidence_;
     std::vector<float> pointsemantic_risk_;
@@ -209,6 +223,14 @@ public:
     void assertSemanticAlignment() const;
     void ensureOnlineSemanticCapacity(int64_t required_rows);
     void refreshOnlineSemanticViews(int64_t logical_rows);
+    torch::Tensor buildSemanticGaussianPriorInput(
+        const torch::Tensor& base_xyz,
+        const torch::Tensor& base_rgb,
+        const torch::Tensor& depth,
+        const torch::Tensor& object_latent,
+        const torch::Tensor& confidence,
+        const torch::Tensor& prior_context,
+        torch::DeviceType device_type) const;
     bool applySemanticGaussianPrior(
         const torch::Tensor& base_xyz,
         const torch::Tensor& base_rgb,
@@ -216,6 +238,7 @@ public:
         float focal,
         const torch::Tensor& object_latent,
         const torch::Tensor& confidence,
+        const torch::Tensor& prior_context,
         torch::Tensor& prior_xyz,
         torch::Tensor& prior_features_dc,
         torch::Tensor& prior_scaling,
@@ -228,6 +251,7 @@ public:
         float focal,
         const torch::Tensor& object_latent,
         const torch::Tensor& confidence,
+        const torch::Tensor& prior_context,
         const torch::Tensor& base_scaling,
         const torch::Tensor& base_opacity);
 
@@ -314,6 +338,10 @@ public:
     bool semantic_gaussian_prior_enabled_;
     std::string semantic_gaussian_prior_model_path_;
     std::string semantic_gaussian_prior_strategy_;
+    int semantic_gaussian_prior_input_dim_;
+    float semantic_gaussian_prior_context_gain_;
+    bool semantic_gaussian_prior_exact_spacing_;
+    bool semantic_gaussian_prior_lightweight_context_;
     float semantic_gaussian_prior_mean_offset_limit_;
     float semantic_gaussian_prior_log_scale_limit_;
     float semantic_gaussian_prior_color_residual_limit_;

@@ -15,7 +15,12 @@ residual_optimization_iters="${PRIOR_RESIDUAL_OPTIMIZATION_ITERS:-100}"
 prior_enabled="${SEMANTIC_GAUSSIAN_PRIOR_ENABLED:-false}"
 prior_model="${SEMANTIC_GAUSSIAN_PRIOR_MODEL:-}"
 prior_strategy="${SEMANTIC_GAUSSIAN_PRIOR_STRATEGY:-full}"
+prior_input_dim="${SEMANTIC_GAUSSIAN_PRIOR_INPUT_DIM:-24}"
+prior_context_gain="${SEMANTIC_GAUSSIAN_PRIOR_CONTEXT_GAIN:-1.0}"
+prior_exact_spacing="${SEMANTIC_GAUSSIAN_PRIOR_EXACT_SPACING:-true}"
+prior_lightweight_context="${SEMANTIC_GAUSSIAN_PRIOR_LIGHTWEIGHT_CONTEXT:-false}"
 prior_mean_offset_limit="${SEMANTIC_GAUSSIAN_PRIOR_MEAN_OFFSET_LIMIT:-1.0}"
+prior_log_scale_limit="${SEMANTIC_GAUSSIAN_PRIOR_LOG_SCALE_LIMIT:-1.0}"
 evaluation_save_images="${EVALUATION_SAVE_IMAGES:-true}"
 gaussian_root="/root/autodl-tmp/catkin_gaussian/src/Gaussian-LIC"
 config_path="${gaussian_root}/config/r3live_paper.yaml"
@@ -59,25 +64,82 @@ if [ "${prior_enabled}" = "true" ] && [ ! -f "${prior_model}" ]; then
     echo "Semantic Gaussian Prior model does not exist: ${prior_model}" >&2
     exit 2
 fi
+if [ "${prior_input_dim}" != "24" ] && [ "${prior_input_dim}" != "38" ]; then
+    echo "SEMANTIC_GAUSSIAN_PRIOR_INPUT_DIM must be 24 or 38." >&2
+    exit 2
+fi
 
 roscore_pid=""
 gaussian_pid=""
+
+ros_master_ready()
+{
+    rosparam get /run_id >/dev/null 2>&1
+}
 
 cleanup()
 {
     if [ -n "${gaussian_pid}" ] && kill -0 "${gaussian_pid}" 2>/dev/null; then
         kill -TERM "${gaussian_pid}" 2>/dev/null
+        for _ in $(seq 1 20); do
+            if ! kill -0 "${gaussian_pid}" 2>/dev/null; then
+                break
+            fi
+            sleep 0.5
+        done
+        if kill -0 "${gaussian_pid}" 2>/dev/null; then
+            kill -KILL "${gaussian_pid}" 2>/dev/null
+        fi
+        wait "${gaussian_pid}" 2>/dev/null
     fi
     if [ -n "${roscore_pid}" ] && kill -0 "${roscore_pid}" 2>/dev/null; then
         kill -TERM "${roscore_pid}" 2>/dev/null
+        for _ in $(seq 1 20); do
+            if ! kill -0 "${roscore_pid}" 2>/dev/null; then
+                break
+            fi
+            sleep 0.5
+        done
+        if kill -0 "${roscore_pid}" 2>/dev/null; then
+            kill -KILL "${roscore_pid}" 2>/dev/null
+        fi
+        wait "${roscore_pid}" 2>/dev/null
+        for _ in $(seq 1 20); do
+            if ! ros_master_ready && ! pgrep -x rosmaster >/dev/null; then
+                break
+            fi
+            sleep 0.5
+        done
     fi
 }
 trap cleanup EXIT
 
-if ! pgrep -x rosmaster >/dev/null; then
+if ! ros_master_ready; then
+    # A previous sequential run may leave a dying rosmaster process briefly
+    # visible after its XML-RPC endpoint has already stopped accepting requests.
+    for _ in $(seq 1 20); do
+        if ! pgrep -x rosmaster >/dev/null; then
+            break
+        fi
+        sleep 0.5
+    done
+fi
+if ! ros_master_ready; then
     roscore >"${log_dir}/roscore.log" 2>&1 &
     roscore_pid=$!
-    sleep 4
+    for _ in $(seq 1 60); do
+        if ros_master_ready; then
+            break
+        fi
+        if ! kill -0 "${roscore_pid}" 2>/dev/null; then
+            break
+        fi
+        sleep 0.5
+    done
+fi
+if ! ros_master_ready; then
+    echo "ROS master did not become ready." >&2
+    exit 3
 fi
 yes | rosnode cleanup >/dev/null 2>&1
 
@@ -92,7 +154,12 @@ stdbuf -oL -eL "${gaussian_root}/../../devel/lib/gaussian_lic/gs_mapping" \
     _semantic_gaussian_prior_enabled:="${prior_enabled}" \
     _semantic_gaussian_prior_model_path:="${prior_model}" \
     _semantic_gaussian_prior_strategy:="${prior_strategy}" \
+    _semantic_gaussian_prior_input_dim:="${prior_input_dim}" \
+    _semantic_gaussian_prior_context_gain:="${prior_context_gain}" \
+    _semantic_gaussian_prior_exact_spacing:="${prior_exact_spacing}" \
+    _semantic_gaussian_prior_lightweight_context:="${prior_lightweight_context}" \
     _semantic_gaussian_prior_mean_offset_limit:="${prior_mean_offset_limit}" \
+    _semantic_gaussian_prior_log_scale_limit:="${prior_log_scale_limit}" \
     _residual_optimization_iters:="${residual_optimization_iters}" \
     _evaluation_save_images:="${evaluation_save_images}" \
     >"${log_dir}/gaussian.log" 2>&1 &
@@ -160,7 +227,12 @@ residual_optimization_iters=${residual_optimization_iters}
 semantic_gaussian_prior_enabled=${prior_enabled}
 semantic_gaussian_prior_model_path=${prior_model}
 semantic_gaussian_prior_strategy=${prior_strategy}
+semantic_gaussian_prior_input_dim=${prior_input_dim}
+semantic_gaussian_prior_context_gain=${prior_context_gain}
+semantic_gaussian_prior_exact_spacing=${prior_exact_spacing}
+semantic_gaussian_prior_lightweight_context=${prior_lightweight_context}
 semantic_gaussian_prior_mean_offset_limit=${prior_mean_offset_limit}
+semantic_gaussian_prior_log_scale_limit=${prior_log_scale_limit}
 evaluation_save_images=${evaluation_save_images}
 EOF
 
@@ -179,3 +251,8 @@ echo "RANDOM_SEED=${random_seed}"
 echo "RESIDUAL_OPTIMIZATION_ITERS=${residual_optimization_iters}"
 echo "SEMANTIC_GAUSSIAN_PRIOR_ENABLED=${prior_enabled}"
 echo "SEMANTIC_GAUSSIAN_PRIOR_STRATEGY=${prior_strategy}"
+echo "SEMANTIC_GAUSSIAN_PRIOR_INPUT_DIM=${prior_input_dim}"
+echo "SEMANTIC_GAUSSIAN_PRIOR_CONTEXT_GAIN=${prior_context_gain}"
+echo "SEMANTIC_GAUSSIAN_PRIOR_EXACT_SPACING=${prior_exact_spacing}"
+echo "SEMANTIC_GAUSSIAN_PRIOR_LIGHTWEIGHT_CONTEXT=${prior_lightweight_context}"
+echo "SEMANTIC_GAUSSIAN_PRIOR_LOG_SCALE_LIMIT=${prior_log_scale_limit}"

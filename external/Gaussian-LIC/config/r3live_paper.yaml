@@ -31,6 +31,10 @@ prune_opacity_threshold: 0.0
 semantic_gaussian_prior_enabled: false
 semantic_gaussian_prior_model_path: ""
 semantic_gaussian_prior_strategy: "full"
+semantic_gaussian_prior_input_dim: 24
+semantic_gaussian_prior_context_gain: 1.0
+semantic_gaussian_prior_exact_spacing: true
+semantic_gaussian_prior_lightweight_context: false
 semantic_gaussian_prior_mean_offset_limit: 1.0
 semantic_gaussian_prior_log_scale_limit: 1.0
 semantic_gaussian_prior_color_residual_limit: 0.25

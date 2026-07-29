@@ -94,6 +94,10 @@ public:
         semantic_gaussian_prior_enabled = node["semantic_gaussian_prior_enabled"] ? node["semantic_gaussian_prior_enabled"].as<bool>() : false;
         semantic_gaussian_prior_model_path = node["semantic_gaussian_prior_model_path"] ? node["semantic_gaussian_prior_model_path"].as<std::string>() : "";
         semantic_gaussian_prior_strategy = node["semantic_gaussian_prior_strategy"] ? node["semantic_gaussian_prior_strategy"].as<std::string>() : "full";
+        semantic_gaussian_prior_input_dim = node["semantic_gaussian_prior_input_dim"] ? node["semantic_gaussian_prior_input_dim"].as<int>() : 24;
+        semantic_gaussian_prior_context_gain = node["semantic_gaussian_prior_context_gain"] ? node["semantic_gaussian_prior_context_gain"].as<double>() : 1.0;
+        semantic_gaussian_prior_exact_spacing = node["semantic_gaussian_prior_exact_spacing"] ? node["semantic_gaussian_prior_exact_spacing"].as<bool>() : true;
+        semantic_gaussian_prior_lightweight_context = node["semantic_gaussian_prior_lightweight_context"] ? node["semantic_gaussian_prior_lightweight_context"].as<bool>() : false;
         semantic_gaussian_prior_mean_offset_limit = node["semantic_gaussian_prior_mean_offset_limit"] ? node["semantic_gaussian_prior_mean_offset_limit"].as<double>() : 1.0;
         semantic_gaussian_prior_log_scale_limit = node["semantic_gaussian_prior_log_scale_limit"] ? node["semantic_gaussian_prior_log_scale_limit"].as<double>() : 1.0;
         semantic_gaussian_prior_color_residual_limit = node["semantic_gaussian_prior_color_residual_limit"] ? node["semantic_gaussian_prior_color_residual_limit"].as<double>() : 0.25;
@@ -171,6 +175,10 @@ public:
     bool semantic_gaussian_prior_enabled;
     std::string semantic_gaussian_prior_model_path;
     std::string semantic_gaussian_prior_strategy;
+    int semantic_gaussian_prior_input_dim;
+    double semantic_gaussian_prior_context_gain;
+    bool semantic_gaussian_prior_exact_spacing;
+    bool semantic_gaussian_prior_lightweight_context;
     double semantic_gaussian_prior_mean_offset_limit;
     double semantic_gaussian_prior_log_scale_limit;
     double semantic_gaussian_prior_color_residual_limit;

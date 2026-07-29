@@ -811,6 +811,45 @@ int main(int argc, char** argv)
         semantic_gaussian_prior_strategy);
     config_node["semantic_gaussian_prior_strategy"] =
         semantic_gaussian_prior_strategy;
+    int semantic_gaussian_prior_input_dim =
+        config_node["semantic_gaussian_prior_input_dim"]
+            ? config_node["semantic_gaussian_prior_input_dim"].as<int>() : 24;
+    nh.param<int>(
+        "semantic_gaussian_prior_input_dim",
+        semantic_gaussian_prior_input_dim,
+        semantic_gaussian_prior_input_dim);
+    config_node["semantic_gaussian_prior_input_dim"] =
+        semantic_gaussian_prior_input_dim;
+    double semantic_gaussian_prior_context_gain =
+        config_node["semantic_gaussian_prior_context_gain"]
+            ? config_node["semantic_gaussian_prior_context_gain"].as<double>()
+            : 1.0;
+    nh.param<double>(
+        "semantic_gaussian_prior_context_gain",
+        semantic_gaussian_prior_context_gain,
+        semantic_gaussian_prior_context_gain);
+    config_node["semantic_gaussian_prior_context_gain"] =
+        semantic_gaussian_prior_context_gain;
+    bool semantic_gaussian_prior_exact_spacing =
+        config_node["semantic_gaussian_prior_exact_spacing"]
+            ? config_node["semantic_gaussian_prior_exact_spacing"].as<bool>()
+            : true;
+    nh.param<bool>(
+        "semantic_gaussian_prior_exact_spacing",
+        semantic_gaussian_prior_exact_spacing,
+        semantic_gaussian_prior_exact_spacing);
+    config_node["semantic_gaussian_prior_exact_spacing"] =
+        semantic_gaussian_prior_exact_spacing;
+    bool semantic_gaussian_prior_lightweight_context =
+        config_node["semantic_gaussian_prior_lightweight_context"]
+            ? config_node["semantic_gaussian_prior_lightweight_context"].as<bool>()
+            : false;
+    nh.param<bool>(
+        "semantic_gaussian_prior_lightweight_context",
+        semantic_gaussian_prior_lightweight_context,
+        semantic_gaussian_prior_lightweight_context);
+    config_node["semantic_gaussian_prior_lightweight_context"] =
+        semantic_gaussian_prior_lightweight_context;
     const std::array<std::string, 4> prior_limit_keys = {
         "semantic_gaussian_prior_mean_offset_limit",
         "semantic_gaussian_prior_log_scale_limit",
@@ -903,6 +942,16 @@ int main(int argc, char** argv)
               << semantic_gaussian_prior_model_path
               << ", semantic_gaussian_prior_strategy="
               << semantic_gaussian_prior_strategy
+              << ", semantic_gaussian_prior_input_dim="
+              << semantic_gaussian_prior_input_dim
+              << ", semantic_gaussian_prior_context_gain="
+              << semantic_gaussian_prior_context_gain
+              << ", semantic_gaussian_prior_exact_spacing="
+              << (semantic_gaussian_prior_exact_spacing ? "true" : "false")
+              << ", semantic_gaussian_prior_lightweight_context="
+              << (semantic_gaussian_prior_lightweight_context
+                      ? "true"
+                      : "false")
               << ", residual_optimization_iters="
               << residual_optimization_iters
               << ", evaluation_save_images="

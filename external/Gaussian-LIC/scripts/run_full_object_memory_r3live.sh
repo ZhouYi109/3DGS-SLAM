@@ -68,6 +68,10 @@ if ! [[ "${residual_optimization_iters}" =~ ^[0-9]+$ ]]; then
     exit 2
 fi
 prior_strategy="${SEMANTIC_GAUSSIAN_PRIOR_STRATEGY:-full}"
+prior_input_dim="${SEMANTIC_GAUSSIAN_PRIOR_INPUT_DIM:-24}"
+prior_context_gain="${SEMANTIC_GAUSSIAN_PRIOR_CONTEXT_GAIN:-1.0}"
+prior_exact_spacing="${SEMANTIC_GAUSSIAN_PRIOR_EXACT_SPACING:-true}"
+prior_lightweight_context="${SEMANTIC_GAUSSIAN_PRIOR_LIGHTWEIGHT_CONTEXT:-false}"
 case "${prior_strategy}" in
     full|geometry_only|appearance_only)
         ;;
@@ -76,6 +80,10 @@ case "${prior_strategy}" in
         exit 2
         ;;
 esac
+if [ "${prior_input_dim}" != "24" ] && [ "${prior_input_dim}" != "38" ]; then
+    echo "SEMANTIC_GAUSSIAN_PRIOR_INPUT_DIM must be 24 or 38." >&2
+    exit 2
+fi
 semantic_gaussian_prior_override="${SEMANTIC_GAUSSIAN_PRIOR_ENABLED:-}"
 if [ -n "${semantic_gaussian_prior_override}" ] \
     && [ "${semantic_gaussian_prior_override}" != "true" ] \
@@ -226,6 +234,10 @@ stdbuf -oL -eL "/root/autodl-tmp/catkin_gaussian/devel/lib/gaussian_lic/gs_mappi
     _semantic_feature_delta_required:="${semantic_feature_delta_required}" \
     _semantic_gaussian_prior_model_path:="${SEMANTIC_GAUSSIAN_PRIOR_MODEL:-/root/autodl-fs/models/semantic_gaussian_prior/r3live_distilled.ts}" \
     _semantic_gaussian_prior_strategy:="${prior_strategy}" \
+    _semantic_gaussian_prior_input_dim:="${prior_input_dim}" \
+    _semantic_gaussian_prior_context_gain:="${prior_context_gain}" \
+    _semantic_gaussian_prior_exact_spacing:="${prior_exact_spacing}" \
+    _semantic_gaussian_prior_lightweight_context:="${prior_lightweight_context}" \
     _semantic_gaussian_prior_mean_offset_limit:="${SEMANTIC_GAUSSIAN_PRIOR_MEAN_OFFSET_LIMIT:-1.0}" \
     _semantic_gaussian_prior_log_scale_limit:="${SEMANTIC_GAUSSIAN_PRIOR_LOG_SCALE_LIMIT:-1.0}" \
     _semantic_gaussian_prior_color_residual_limit:="${SEMANTIC_GAUSSIAN_PRIOR_COLOR_RESIDUAL_LIMIT:-0.25}" \
@@ -526,6 +538,10 @@ config_mode=${config_mode}
 residual_optimization_iters=${residual_optimization_iters}
 semantic_gaussian_prior_override=${semantic_gaussian_prior_override:-config}
 semantic_gaussian_prior_strategy=${prior_strategy}
+semantic_gaussian_prior_input_dim=${prior_input_dim}
+semantic_gaussian_prior_context_gain=${prior_context_gain}
+semantic_gaussian_prior_exact_spacing=${prior_exact_spacing}
+semantic_gaussian_prior_lightweight_context=${prior_lightweight_context}
 frontend_mode=${frontend_mode}
 semantic_mode=${semantic_mode}
 semantic_ready=${semantic_ready}
@@ -562,6 +578,10 @@ echo "CONFIG_MODE=${config_mode}"
 echo "RESIDUAL_OPTIMIZATION_ITERS=${residual_optimization_iters}"
 echo "SEMANTIC_GAUSSIAN_PRIOR_OVERRIDE=${semantic_gaussian_prior_override:-config}"
 echo "SEMANTIC_GAUSSIAN_PRIOR_STRATEGY=${prior_strategy}"
+echo "SEMANTIC_GAUSSIAN_PRIOR_INPUT_DIM=${prior_input_dim}"
+echo "SEMANTIC_GAUSSIAN_PRIOR_CONTEXT_GAIN=${prior_context_gain}"
+echo "SEMANTIC_GAUSSIAN_PRIOR_EXACT_SPACING=${prior_exact_spacing}"
+echo "SEMANTIC_GAUSSIAN_PRIOR_LIGHTWEIGHT_CONTEXT=${prior_lightweight_context}"
 echo "FRONTEND_MODE=${frontend_mode}"
 echo "SEMANTIC_MODE=${semantic_mode}"
 echo "SEMANTIC_READY=${semantic_ready}"
