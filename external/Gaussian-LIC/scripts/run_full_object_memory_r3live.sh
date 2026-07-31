@@ -58,14 +58,17 @@ case "${config_mode}" in
     r3live_prior)
         default_residual_optimization_iters=20
         default_teacher_rollout_steps=0
+        default_prior_input_dim=24
         ;;
     r3live_teacher)
         default_residual_optimization_iters=100
         default_teacher_rollout_steps=5
+        default_prior_input_dim=38
         ;;
     *)
         default_residual_optimization_iters=100
         default_teacher_rollout_steps=0
+        default_prior_input_dim=24
         ;;
 esac
 residual_optimization_iters="${PRIOR_RESIDUAL_OPTIMIZATION_ITERS:-${default_residual_optimization_iters}}"
@@ -83,7 +86,7 @@ if [ "${teacher_rollout_steps}" -gt "${residual_optimization_iters}" ]; then
     exit 2
 fi
 prior_strategy="${SEMANTIC_GAUSSIAN_PRIOR_STRATEGY:-full}"
-prior_input_dim="${SEMANTIC_GAUSSIAN_PRIOR_INPUT_DIM:-24}"
+prior_input_dim="${SEMANTIC_GAUSSIAN_PRIOR_INPUT_DIM:-${default_prior_input_dim}}"
 prior_context_gain="${SEMANTIC_GAUSSIAN_PRIOR_CONTEXT_GAIN:-1.0}"
 prior_exact_spacing="${SEMANTIC_GAUSSIAN_PRIOR_EXACT_SPACING:-true}"
 prior_lightweight_context="${SEMANTIC_GAUSSIAN_PRIOR_LIGHTWEIGHT_CONTEXT:-false}"

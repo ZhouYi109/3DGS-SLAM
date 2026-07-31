@@ -152,8 +152,10 @@ rendering reconstruction or short-unroll supervision.
 
 ## E023 render-gradient rollout contract
 
-`r3live_teacher.yaml` now sets `teacher_rollout_steps: 5`. In addition to the
-legacy candidate input and final 100-step PLY target, the Teacher records:
+`r3live_teacher.yaml` now sets `teacher_rollout_steps: 5` and defaults to the
+38D `context_v4` input required by the E022 v4 initialization checkpoint.
+The general runner keeps 24D for non-Teacher modes. In addition to the legacy
+candidate input and final 100-step PLY target, the Teacher records:
 
 ```text
 candidate_rollout_parameter.npy         [candidate,14]
