@@ -888,6 +888,13 @@ int main(int argc, char** argv)
         teacher_distillation_export_enabled);
     config_node["teacher_distillation_export_enabled"] =
         teacher_distillation_export_enabled;
+    int teacher_rollout_steps = config_node["teacher_rollout_steps"]
+        ? config_node["teacher_rollout_steps"].as<int>() : 0;
+    nh.param<int>(
+        "teacher_rollout_steps",
+        teacher_rollout_steps,
+        teacher_rollout_steps);
+    config_node["teacher_rollout_steps"] = teacher_rollout_steps;
     int prune_every_keyframes = config_node["prune_every_keyframes"]
         ? config_node["prune_every_keyframes"].as<int>() : 0;
     nh.param<int>("prune_every_keyframes", prune_every_keyframes, prune_every_keyframes);
@@ -958,6 +965,7 @@ int main(int argc, char** argv)
               << (evaluation_save_images ? "true" : "false")
               << ", teacher_distillation_export_enabled="
               << (teacher_distillation_export_enabled ? "true" : "false")
+              << ", teacher_rollout_steps=" << teacher_rollout_steps
               << ", semantic_storage_growth_rows=" << semantic_storage_growth_rows
               << std::endl;
     bool dynamic_appearance_weight = true;

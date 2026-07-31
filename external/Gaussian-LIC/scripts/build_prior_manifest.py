@@ -54,6 +54,8 @@ def main() -> None:
 
     shards = []
     input_dims = set()
+    rollout_presence = set()
+    rollout_steps_values = set()
     for path in sorted(args.shard_root.rglob("*.npz")):
         data = np.load(path)
         inputs = data["input"]
@@ -65,6 +67,48 @@ def main() -> None:
         input_dims.add(int(inputs.shape[1]))
         if targets.shape != (inputs.shape[0], OUTPUT_DIM):
             raise ValueError(f"{path}: expected target [N,{OUTPUT_DIM}]")
+        rollout_keys = {
+            "rollout_target",
+            "rollout_visibility",
+            "rollout_gradient",
+            "rollout_steps",
+            "rollout_valid",
+            "configured_rollout_steps",
+        }
+        present_rollout_keys = rollout_keys.intersection(data.files)
+        if present_rollout_keys and present_rollout_keys != rollout_keys:
+            missing = sorted(rollout_keys.difference(present_rollout_keys))
+            raise ValueError(f"{path}: incomplete rollout keys: {missing}")
+        has_rollout = present_rollout_keys == rollout_keys
+        rollout_presence.add(has_rollout)
+        if has_rollout:
+            rollout_target = np.asarray(data["rollout_target"])
+            rollout_visibility = np.asarray(data["rollout_visibility"])
+            rollout_gradient = np.asarray(data["rollout_gradient"])
+            rollout_steps = np.asarray(data["rollout_steps"])
+            rollout_valid = np.asarray(data["rollout_valid"])
+            configured_rollout_steps = int(
+                optional_scalar(data, "configured_rollout_steps", 0)
+            )
+            if (
+                rollout_target.shape != (inputs.shape[0], OUTPUT_DIM)
+                or rollout_visibility.shape != (inputs.shape[0],)
+                or rollout_gradient.shape != (inputs.shape[0], 5)
+                or rollout_steps.shape != (inputs.shape[0],)
+                or rollout_valid.shape != (inputs.shape[0],)
+            ):
+                raise ValueError(f"{path}: rollout arrays are not row-aligned")
+            if configured_rollout_steps <= 0:
+                raise ValueError(f"{path}: configured rollout steps must be positive")
+            if (
+                not np.isfinite(rollout_target).all()
+                or not np.isfinite(rollout_visibility).all()
+                or not np.isfinite(rollout_gradient).all()
+                or not np.asarray(rollout_valid, dtype=bool).all()
+                or (rollout_steps < configured_rollout_steps).any()
+            ):
+                raise ValueError(f"{path}: invalid or incomplete rollout rows")
+            rollout_steps_values.add(configured_rollout_steps)
         source = scalar_text(data, "source")
         sequence = scalar_text(data, "sequence")
         embedded_split = scalar_text(data, "split")
@@ -97,11 +141,19 @@ def main() -> None:
             shard["mean_offset_limit"] = float(
                 optional_scalar(data, "mean_offset_limit", 1.0)
             )
+            if has_rollout:
+                shard["rollout_steps"] = configured_rollout_steps
         shards.append(shard)
     if not shards:
         raise RuntimeError("no NPZ shards found")
     if len(input_dims) != 1:
         raise ValueError(f"inconsistent input dimensions: {sorted(input_dims)}")
+    if len(rollout_presence) != 1:
+        raise ValueError("cannot mix rollout and legacy shards in one manifest")
+    if len(rollout_steps_values) > 1:
+        raise ValueError(
+            f"inconsistent rollout steps: {sorted(rollout_steps_values)}"
+        )
     input_dim = next(iter(input_dims))
     contract_name, feature_names = input_contract(input_dim)
     r3live_contracts = {
@@ -126,6 +178,22 @@ def main() -> None:
                 "mean_offset_limit": next(iter(r3live_contracts))[1],
             }
             if r3live_contracts
+            else None
+        ),
+        "rollout_contract": (
+            {
+                "format": "render-gradient-rollout-v1",
+                "steps": next(iter(rollout_steps_values)),
+                "target_dim": OUTPUT_DIM,
+                "gradient_groups": [
+                    "xyz",
+                    "log_scale",
+                    "quaternion",
+                    "sh_dc",
+                    "opacity_logit",
+                ],
+            }
+            if rollout_steps_values
             else None
         ),
         "shards": shards,

@@ -43,6 +43,7 @@ semantic_gaussian_prior_color_residual_limit: 0.25
 semantic_gaussian_prior_opacity_logit_limit: 2.0
 residual_optimization_iters: 100
 teacher_distillation_export_enabled: true
+teacher_rollout_steps: 5
 
 sh_degree: 3
 white_background: false

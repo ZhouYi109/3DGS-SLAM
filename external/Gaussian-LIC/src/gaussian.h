@@ -254,6 +254,8 @@ public:
         const torch::Tensor& prior_context,
         const torch::Tensor& base_scaling,
         const torch::Tensor& base_opacity);
+    void accumulateTeacherRolloutGradients(const torch::Tensor& visible);
+    void finishTeacherRolloutStep();
 
 public:
     int sh_degree_;
@@ -348,11 +350,19 @@ public:
     float semantic_gaussian_prior_opacity_logit_limit_;
     std::unique_ptr<torch::jit::script::Module> semantic_gaussian_prior_model_;
     bool teacher_distillation_export_enabled_;
+    int teacher_rollout_steps_;
+    int64_t teacher_rollout_incomplete_candidates_;
     int32_t next_teacher_candidate_id_;
     torch::Tensor gaussian_candidate_id_;
     torch::Tensor teacher_candidate_inputs_;
     torch::Tensor teacher_candidate_base_scaling_;
     torch::Tensor teacher_candidate_base_opacity_;
+    torch::Tensor teacher_candidate_rollout_parameter_;
+    torch::Tensor teacher_candidate_rollout_visibility_count_;
+    torch::Tensor teacher_candidate_rollout_gradient_sum_;
+    torch::Tensor teacher_candidate_rollout_steps_;
+    torch::Tensor teacher_rollout_capture_rows_;
+    torch::Tensor teacher_rollout_capture_ids_;
 
     torch::Tensor bg_;
 

@@ -57,14 +57,29 @@ esac
 case "${config_mode}" in
     r3live_prior)
         default_residual_optimization_iters=20
+        default_teacher_rollout_steps=0
+        ;;
+    r3live_teacher)
+        default_residual_optimization_iters=100
+        default_teacher_rollout_steps=5
         ;;
     *)
         default_residual_optimization_iters=100
+        default_teacher_rollout_steps=0
         ;;
 esac
 residual_optimization_iters="${PRIOR_RESIDUAL_OPTIMIZATION_ITERS:-${default_residual_optimization_iters}}"
+teacher_rollout_steps="${TEACHER_ROLLOUT_STEPS:-${default_teacher_rollout_steps}}"
 if ! [[ "${residual_optimization_iters}" =~ ^[0-9]+$ ]]; then
     echo "PRIOR_RESIDUAL_OPTIMIZATION_ITERS must be a non-negative integer." >&2
+    exit 2
+fi
+if ! [[ "${teacher_rollout_steps}" =~ ^[0-9]+$ ]]; then
+    echo "TEACHER_ROLLOUT_STEPS must be a non-negative integer." >&2
+    exit 2
+fi
+if [ "${teacher_rollout_steps}" -gt "${residual_optimization_iters}" ]; then
+    echo "TEACHER_ROLLOUT_STEPS cannot exceed residual optimization iterations." >&2
     exit 2
 fi
 prior_strategy="${SEMANTIC_GAUSSIAN_PRIOR_STRATEGY:-full}"
@@ -243,6 +258,7 @@ stdbuf -oL -eL "/root/autodl-tmp/catkin_gaussian/devel/lib/gaussian_lic/gs_mappi
     _semantic_gaussian_prior_color_residual_limit:="${SEMANTIC_GAUSSIAN_PRIOR_COLOR_RESIDUAL_LIMIT:-0.25}" \
     _semantic_gaussian_prior_opacity_logit_limit:="${SEMANTIC_GAUSSIAN_PRIOR_OPACITY_LOGIT_LIMIT:-2.0}" \
     _residual_optimization_iters:="${residual_optimization_iters}" \
+    _teacher_rollout_steps:="${teacher_rollout_steps}" \
     _evaluation_save_images:="${EVALUATION_SAVE_IMAGES:-true}" \
     "${prior_override_remap[@]}" \
     "${weight_remap[@]}" \
@@ -536,6 +552,7 @@ dynamic_geometry_capacity=${dynamic_geometry_capacity}
 random_seed=${random_seed}
 config_mode=${config_mode}
 residual_optimization_iters=${residual_optimization_iters}
+teacher_rollout_steps=${teacher_rollout_steps}
 semantic_gaussian_prior_override=${semantic_gaussian_prior_override:-config}
 semantic_gaussian_prior_strategy=${prior_strategy}
 semantic_gaussian_prior_input_dim=${prior_input_dim}
@@ -576,6 +593,7 @@ echo "DYNAMIC_GEOMETRY_CAPACITY=${dynamic_geometry_capacity}"
 echo "RANDOM_SEED=${random_seed}"
 echo "CONFIG_MODE=${config_mode}"
 echo "RESIDUAL_OPTIMIZATION_ITERS=${residual_optimization_iters}"
+echo "TEACHER_ROLLOUT_STEPS=${teacher_rollout_steps}"
 echo "SEMANTIC_GAUSSIAN_PRIOR_OVERRIDE=${semantic_gaussian_prior_override:-config}"
 echo "SEMANTIC_GAUSSIAN_PRIOR_STRATEGY=${prior_strategy}"
 echo "SEMANTIC_GAUSSIAN_PRIOR_INPUT_DIM=${prior_input_dim}"

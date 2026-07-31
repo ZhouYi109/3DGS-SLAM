@@ -50,6 +50,26 @@ def restore_context_adapter_base_columns(
         input_weight[:, :BASE_INPUT_DIM].copy_(frozen_base_columns)
 
 
+def render_aware_rollout_weight(
+    sample_weight: torch.Tensor,
+    visibility: torch.Tensor,
+    gradient: torch.Tensor,
+    visibility_floor: float,
+    gradient_gain: float,
+) -> torch.Tensor:
+    if gradient.ndim != 2 or gradient.shape[1] != 5:
+        raise ValueError("rollout gradient must have shape [N,5]")
+    visibility_factor = visibility_floor + (1.0 - visibility_floor) * (
+        visibility.reshape(-1).clamp(0.0, 1.0)
+    )
+    gradient_strength = torch.log1p(gradient.clamp_min(0.0)).mean(dim=1)
+    gradient_scale = gradient_strength / gradient_strength.mean().detach().clamp_min(
+        1e-6
+    )
+    gradient_factor = 1.0 + gradient_gain * gradient_scale.clamp(0.0, 4.0)
+    return sample_weight.reshape(-1).clamp_min(0.0) * visibility_factor * gradient_factor
+
+
 def load_compatible_model_state(
     model: SemanticGaussianPriorHead,
     checkpoint_state: dict[str, torch.Tensor],
@@ -85,6 +105,7 @@ class PriorShardDataset(Dataset):
         split: str,
         source: str,
         zero_input_features: tuple[str, ...] = (),
+        include_rollout: bool = False,
     ) -> None:
         payload = json.loads(manifest.read_text(encoding="utf-8"))
         root = manifest.parent
@@ -118,10 +139,24 @@ class PriorShardDataset(Dataset):
         self.zero_input_indices = tuple(
             self.input_features.index(name) for name in zero_input_features
         )
+        self.rollout_contract = payload.get("rollout_contract")
+        self.include_rollout = bool(include_rollout)
+        if self.include_rollout and not self.rollout_contract:
+            raise ValueError("manifest does not contain a rollout contract")
         self.samples: list[tuple[Path, int]] = []
         self.sample_sequence_ids: list[int] = []
         self.sequence_names: list[str] = []
-        self.cache: dict[Path, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self.cache: dict[
+            Path,
+            tuple[
+                np.ndarray,
+                np.ndarray,
+                np.ndarray,
+                np.ndarray | None,
+                np.ndarray | None,
+                np.ndarray | None,
+            ],
+        ] = {}
         sequence_ids: dict[str, int] = {}
         for shard in payload["shards"]:
             if shard["split"] != split or (
@@ -142,7 +177,16 @@ class PriorShardDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def _load(self, path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _load(
+        self, path: Path
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
+    ]:
         if path not in self.cache:
             data = np.load(path)
             inputs = np.asarray(data["input"], dtype=np.float32)
@@ -159,16 +203,64 @@ class PriorShardDataset(Dataset):
                 raise ValueError(f"{path}: target must be [N,{OUTPUT_DIM}]")
             if weights.shape != (inputs.shape[0],):
                 raise ValueError(f"{path}: weight must be [N]")
-            self.cache[path] = inputs, targets, weights
+            rollout_target = None
+            rollout_visibility = None
+            rollout_gradient = None
+            if self.include_rollout:
+                rollout_target = np.asarray(
+                    data["rollout_target"], dtype=np.float32
+                )
+                rollout_visibility = np.asarray(
+                    data["rollout_visibility"], dtype=np.float32
+                )
+                rollout_gradient = np.asarray(
+                    data["rollout_gradient"], dtype=np.float32
+                )
+                if rollout_target.shape != (inputs.shape[0], OUTPUT_DIM):
+                    raise ValueError(
+                        f"{path}: rollout_target must be [N,{OUTPUT_DIM}]"
+                    )
+                if rollout_visibility.shape != (inputs.shape[0],):
+                    raise ValueError(
+                        f"{path}: rollout_visibility must be [N]"
+                    )
+                if rollout_gradient.shape != (inputs.shape[0], 5):
+                    raise ValueError(
+                        f"{path}: rollout_gradient must be [N,5]"
+                    )
+            self.cache[path] = (
+                inputs,
+                targets,
+                weights,
+                rollout_target,
+                rollout_visibility,
+                rollout_gradient,
+            )
         return self.cache[path]
 
     def __getitem__(self, index: int):
         path, row = self.samples[index]
-        inputs, targets, weights = self._load(path)
+        (
+            inputs,
+            targets,
+            weights,
+            rollout_target,
+            rollout_visibility,
+            rollout_gradient,
+        ) = self._load(path)
         features = inputs[row]
         if self.zero_input_indices:
             features = features.copy()
             features[list(self.zero_input_indices)] = 0.0
+        if self.include_rollout:
+            return (
+                features,
+                targets[row],
+                weights[row],
+                rollout_target[row],
+                rollout_visibility[row],
+                rollout_gradient[row],
+            )
         return features, targets[row], weights[row]
 
     def _unique_shards(self) -> list[tuple[Path, int, int]]:
@@ -192,7 +284,7 @@ class PriorShardDataset(Dataset):
             raise ValueError("semantic_fraction must be in [0,1)")
         semantic = np.zeros(len(self.samples), dtype=bool)
         for path, start, end in self._unique_shards():
-            inputs, _, _ = self._load(path)
+            inputs, _, _, _, _, _ = self._load(path)
             semantic[start:end] = (
                 (inputs[:, SEMANTIC_CONFIDENCE_INDEX] > 0.0)
                 & (
@@ -255,6 +347,9 @@ def evaluate(
     device,
     loss_weights,
     decoded_residual_targets,
+    rollout_loss_weight=0.0,
+    rollout_visibility_floor=0.1,
+    rollout_gradient_gain=0.1,
 ) -> dict[str, float]:
     model.eval()
     subsets = {
@@ -262,10 +357,27 @@ def evaluate(
         "semantic_": {"numerator": {}, "denominator": 0.0},
         "nonsemantic_": {"numerator": {}, "denominator": 0.0},
     }
-    for features, target, weight in loader:
+    for batch in loader:
+        features, target, weight = batch[:3]
+        rollout_target = batch[3] if len(batch) == 6 else None
+        rollout_visibility = batch[4] if len(batch) == 6 else None
+        rollout_gradient = batch[5] if len(batch) == 6 else None
         features_device = features.to(device)
         target_device = target.to(device)
         weight_device = weight.to(device)
+        rollout_target_device = (
+            rollout_target.to(device) if rollout_target is not None else None
+        )
+        rollout_visibility_device = (
+            rollout_visibility.to(device)
+            if rollout_visibility is not None
+            else None
+        )
+        rollout_gradient_device = (
+            rollout_gradient.to(device)
+            if rollout_gradient is not None
+            else None
+        )
         prediction = model(features_device)
         semantic_mask = (
             (features_device[:, SEMANTIC_CONFIDENCE_INDEX] > 0.0)
@@ -297,6 +409,31 @@ def evaluate(
                 decoded_residual_targets,
             )
             values = {"loss": loss.detach(), **groups}
+            if rollout_target_device is not None:
+                rollout_weight = render_aware_rollout_weight(
+                    selected_weight,
+                    rollout_visibility_device[mask],
+                    rollout_gradient_device[mask],
+                    rollout_visibility_floor,
+                    rollout_gradient_gain,
+                )
+                rollout_loss, rollout_groups = prior_loss(
+                    prediction[mask],
+                    rollout_target_device[mask],
+                    rollout_weight,
+                    loss_weights,
+                    decoded_residual_targets,
+                )
+                values["rollout_loss"] = rollout_loss.detach()
+                values["task_loss"] = (
+                    loss + rollout_loss_weight * rollout_loss
+                ).detach()
+                values.update(
+                    {
+                        f"rollout_{name}": value
+                        for name, value in rollout_groups.items()
+                    }
+                )
             subsets[prefix]["denominator"] += denominator
             for name, value in values.items():
                 numerator = subsets[prefix]["numerator"]
@@ -360,6 +497,9 @@ def main() -> None:
     parser.add_argument("--saturated-mean-threshold", type=float, default=0.0)
     parser.add_argument("--saturated-mean-weight", type=float, default=1.0)
     parser.add_argument("--decoded-residual-targets", action="store_true")
+    parser.add_argument("--rollout-loss-weight", type=float, default=0.0)
+    parser.add_argument("--rollout-visibility-floor", type=float, default=0.1)
+    parser.add_argument("--rollout-gradient-gain", type=float, default=0.1)
     parser.add_argument(
         "--selection-metric",
         choices=(
@@ -368,6 +508,7 @@ def main() -> None:
             "validation_semantic_loss",
             "validation_geometry_loss",
             "validation_semantic_geometry_loss",
+            "validation_task_loss",
         ),
         default="validation_loss",
     )
@@ -386,6 +527,14 @@ def main() -> None:
         raise ValueError("--backbone-learning-rate-scale must be in (0,1]")
     if not 0.0 <= args.saturated_mean_weight <= 1.0:
         raise ValueError("--saturated-mean-weight must be in [0,1]")
+    if args.rollout_loss_weight < 0.0:
+        raise ValueError("--rollout-loss-weight must be non-negative")
+    if not 0.0 <= args.rollout_visibility_floor <= 1.0:
+        raise ValueError("--rollout-visibility-floor must be in [0,1]")
+    if args.rollout_gradient_gain < 0.0:
+        raise ValueError("--rollout-gradient-gain must be non-negative")
+    if args.rollout_loss_weight > 0.0 and args.stage != "r3live_distill":
+        raise ValueError("rollout supervision is only valid for R3LIVE distillation")
     loss_weights = (
         args.mean_loss_weight,
         args.scale_loss_weight,
@@ -413,17 +562,20 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     source = "nuscenes" if args.stage == "nuscenes_pretrain" else "r3live_teacher"
     zero_input_features = tuple(dict.fromkeys(args.zero_input_feature))
+    include_rollout = args.rollout_loss_weight > 0.0
     train_data = PriorShardDataset(
         args.manifest,
         "train",
         source,
         zero_input_features,
+        include_rollout,
     )
     validation_data = PriorShardDataset(
         args.manifest,
         "validation",
         source,
         zero_input_features,
+        include_rollout,
     )
 
     sampler = None
@@ -537,6 +689,7 @@ def main() -> None:
         "loss_weights": loss_weights,
         "sampling": sampling_summary,
         "target_contract": target_contract,
+        "rollout_contract": train_data.rollout_contract,
         "input_dim": train_data.input_dim,
         "input_contract": train_data.input_contract,
         "input_features": train_data.input_features,
@@ -553,9 +706,14 @@ def main() -> None:
         model.train()
         train_total = 0.0
         train_denominator = 0.0
-        for features, target, weight in train_loader:
+        for batch in train_loader:
+            features, target, weight = batch[:3]
+            rollout_target = batch[3] if len(batch) == 6 else None
+            rollout_visibility = batch[4] if len(batch) == 6 else None
+            rollout_gradient = batch[5] if len(batch) == 6 else None
             optimizer.zero_grad(set_to_none=True)
-            prediction = model(features.to(device, non_blocking=True))
+            features_device = features.to(device, non_blocking=True)
+            prediction = model(features_device)
             training_weight = weight.to(device, non_blocking=True)
             if args.saturated_mean_threshold > 0.0:
                 saturated = (
@@ -574,6 +732,22 @@ def main() -> None:
                 loss_weights,
                 args.decoded_residual_targets,
             )
+            if rollout_target is not None:
+                rollout_weight = render_aware_rollout_weight(
+                    training_weight,
+                    rollout_visibility.to(device, non_blocking=True),
+                    rollout_gradient.to(device, non_blocking=True),
+                    args.rollout_visibility_floor,
+                    args.rollout_gradient_gain,
+                )
+                rollout_loss, _ = prior_loss(
+                    prediction,
+                    rollout_target.to(device, non_blocking=True),
+                    rollout_weight,
+                    loss_weights,
+                    args.decoded_residual_targets,
+                )
+                loss = loss + args.rollout_loss_weight * rollout_loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
@@ -592,6 +766,9 @@ def main() -> None:
             device,
             loss_weights,
             args.decoded_residual_targets,
+            args.rollout_loss_weight,
+            args.rollout_visibility_floor,
+            args.rollout_gradient_gain,
         )
         row = {
             "epoch": epoch,

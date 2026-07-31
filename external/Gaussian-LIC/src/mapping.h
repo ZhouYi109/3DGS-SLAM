@@ -105,6 +105,7 @@ public:
         residual_optimization_iters = node["residual_optimization_iters"] ? node["residual_optimization_iters"].as<int>() : 100;
         evaluation_save_images = node["evaluation_save_images"] ? node["evaluation_save_images"].as<bool>() : true;
         teacher_distillation_export_enabled = node["teacher_distillation_export_enabled"] ? node["teacher_distillation_export_enabled"].as<bool>() : false;
+        teacher_rollout_steps = node["teacher_rollout_steps"] ? node["teacher_rollout_steps"].as<int>() : 0;
         prune_every_keyframes = node["prune_every_keyframes"] ? node["prune_every_keyframes"].as<int>() : 0;
         prune_opacity_threshold = node["prune_opacity_threshold"] ? node["prune_opacity_threshold"].as<double>() : 0.0;
         std::string pkg_path = ros::package::getPath("gaussian_lic");
@@ -186,6 +187,7 @@ public:
     int residual_optimization_iters;
     bool evaluation_save_images;
     bool teacher_distillation_export_enabled;
+    int teacher_rollout_steps;
     int prune_every_keyframes;
     double prune_opacity_threshold;
     std::string engine_path;

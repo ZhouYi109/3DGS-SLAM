@@ -8,7 +8,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from build_r3live_teacher_shards import teacher_sample_weight
+from build_r3live_teacher_shards import (
+    encode_parameter_target,
+    teacher_sample_weight,
+)
 from semantic_gaussian_prior_model import (
     CONTEXT_INPUT_DIM,
     CONTEXT_FEATURE_NAMES,
@@ -23,6 +26,7 @@ from train_semantic_gaussian_prior import (
     PriorShardDataset,
     configure_context_adapter_only,
     load_compatible_model_state,
+    render_aware_rollout_weight,
     restore_context_adapter_base_columns,
 )
 
@@ -147,6 +151,90 @@ class SemanticGaussianPriorTest(unittest.TestCase):
             rtol=1e-6,
             atol=1e-6,
         )
+
+    def test_rollout_target_uses_same_bounded_decoder_contract(self):
+        inputs = np.zeros((1, CONTEXT_INPUT_DIM), dtype=np.float32)
+        inputs[:, 3:6] = 0.5
+        base_scaling = np.zeros((1, 3), dtype=np.float32)
+        base_opacity = np.zeros((1, 1), dtype=np.float32)
+        target = encode_parameter_target(
+            inputs,
+            base_scaling,
+            base_opacity,
+            np.array([[2.0, -1.0, 0.0]], dtype=np.float32),
+            np.array([[0.25, -0.25, 0.0]], dtype=np.float32),
+            np.array([[2.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+            np.array([[0.75, 0.25, 0.5]], dtype=np.float32),
+            np.array([[1.0]], dtype=np.float32),
+            mean_offset_limit=4.0,
+            target_encoding="decoded_v2",
+        )
+        np.testing.assert_allclose(
+            target[0, 0:3],
+            np.array([0.5, -0.25, 0.0], dtype=np.float32),
+        )
+        np.testing.assert_allclose(target[0, 3:6], [0.25, -0.25, 0.0])
+        np.testing.assert_allclose(target[0, 6:10], [1.0, 0.0, 0.0, 0.0])
+        np.testing.assert_allclose(target[0, 10:13], [0.999, -0.999, 0.0])
+        self.assertEqual(float(target[0, 13]), 1.0)
+
+    def test_rollout_dataset_and_render_weight(self):
+        _, feature_names = input_contract(CONTEXT_INPUT_DIM)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            rows = 3
+            inputs = np.ones((rows, CONTEXT_INPUT_DIM), dtype=np.float32)
+            targets = np.zeros((rows, 14), dtype=np.float32)
+            targets[:, 6] = 1.0
+            np.savez(
+                root / "train.npz",
+                input=inputs,
+                target=targets,
+                weight=np.ones(rows, dtype=np.float32),
+                rollout_target=targets,
+                rollout_visibility=np.array([0.0, 0.5, 1.0], dtype=np.float32),
+                rollout_gradient=np.array(
+                    [[0.0] * 5, [1.0] * 5, [4.0] * 5],
+                    dtype=np.float32,
+                ),
+            )
+            manifest = {
+                "input_dim": CONTEXT_INPUT_DIM,
+                "input_contract": "context_v4",
+                "input_features": feature_names,
+                "rollout_contract": {
+                    "format": "render-gradient-rollout-v1",
+                    "steps": 5,
+                },
+                "shards": [
+                    {
+                        "path": "train.npz",
+                        "count": rows,
+                        "split": "train",
+                        "source": "r3live_teacher",
+                        "sequence": "synthetic",
+                    }
+                ],
+            }
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            dataset = PriorShardDataset(
+                manifest_path,
+                "train",
+                "r3live_teacher",
+                include_rollout=True,
+            )
+            self.assertEqual(len(dataset[0]), 6)
+            rollout_weight = render_aware_rollout_weight(
+                torch.ones(rows),
+                torch.tensor([0.0, 0.5, 1.0]),
+                torch.tensor([[0.0] * 5, [1.0] * 5, [4.0] * 5]),
+                visibility_floor=0.1,
+                gradient_gain=0.1,
+            )
+            self.assertTrue(torch.isfinite(rollout_weight).all())
+            self.assertLess(float(rollout_weight[0]), float(rollout_weight[1]))
+            self.assertLess(float(rollout_weight[1]), float(rollout_weight[2]))
 
     def test_context_adapter_only_preserves_v3_parameters(self):
         torch.manual_seed(11)

@@ -149,3 +149,51 @@ lightweight v4 at 20 residual steps improved mean novel-view PSNR by only about
 to recover the 20-step baseline. Treat parameter-only Teacher distillation as
 an ablation, not the final method. The next model must be selected with
 rendering reconstruction or short-unroll supervision.
+
+## E023 render-gradient rollout contract
+
+`r3live_teacher.yaml` now sets `teacher_rollout_steps: 5`. In addition to the
+legacy candidate input and final 100-step PLY target, the Teacher records:
+
+```text
+candidate_rollout_parameter.npy         [candidate,14]
+candidate_rollout_visibility_count.npy  [candidate]
+candidate_rollout_gradient_sum.npy      [candidate,5]
+candidate_rollout_steps.npy             [candidate]
+```
+
+The parameter layout is world XYZ, log scale, normalized quaternion, RGB, and
+opacity logit. The five gradient groups are XYZ, log scale, quaternion, SH DC,
+and opacity logit. Candidate IDs remain the only join key. A rollout state is
+captured immediately after the candidate completes five real renderer
+backpropagation/optimizer steps, even when those steps span keyframes.
+
+Build rollout-only shards with:
+
+```bash
+python scripts/build_r3live_teacher_shards.py \
+  --result /path/to/teacher_result \
+  --sequence hku_campus_seq_00 \
+  --split train \
+  --output /path/to/e023_shards/hku_campus_seq_00 \
+  --mean-offset-limit 4.0 \
+  --target-encoding decoded_v2 \
+  --require-rollout
+```
+
+The resulting shard retains the final 100-step `target` and adds
+`rollout_target`, rollout visibility, mean render-gradient norms, and the
+completed step count. Train the fixed auxiliary-loss sweep with:
+
+```bash
+PRIOR_MANIFEST=/path/to/e023_manifest.json \
+PRIOR_INIT_CHECKPOINT=/path/to/v4/best.pt \
+PRIOR_OUTPUT_ROOT=/path/to/e023_training \
+bash scripts/run_render_aware_prior_training.sh
+```
+
+This E023 phase is trajectory-aware distillation, not yet end-to-end
+differentiation through the Gaussian renderer. It is the compatibility-safe
+bridge needed to audit whether five-step renderer information improves the
+`Prior10 >= No-Prior20` gate before implementing a full differentiable
+multi-view unroll.

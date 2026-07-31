@@ -1422,6 +1422,20 @@ GaussianModel::GaussianModel(const Params& prm)
     evaluation_save_images_ = prm.evaluation_save_images;
     teacher_distillation_export_enabled_ =
         prm.teacher_distillation_export_enabled;
+    teacher_rollout_steps_ = teacher_distillation_export_enabled_
+        ? std::max(0, prm.teacher_rollout_steps)
+        : 0;
+    if (teacher_rollout_steps_ > residual_optimization_iters_)
+    {
+        throw std::invalid_argument(
+            "teacher_rollout_steps cannot exceed residual_optimization_iters");
+    }
+    if (teacher_rollout_steps_ > 0 && prm.prune_every_keyframes > 0)
+    {
+        throw std::invalid_argument(
+            "Teacher rollout requires pruning to remain disabled");
+    }
+    teacher_rollout_incomplete_candidates_ = 0;
     next_teacher_candidate_id_ = 0;
     random_generator_.seed(random_seed_);
     torch::manual_seed(static_cast<uint64_t>(random_seed_));
@@ -1515,7 +1529,9 @@ GaussianModel::GaussianModel(const Params& prm)
                           ? "true"
                           : "false")
                   << ", residual_optimization_iters="
-                  << residual_optimization_iters_ << std::endl;
+                  << residual_optimization_iters_
+                  << ", teacher_rollout_steps="
+                  << teacher_rollout_steps_ << std::endl;
     }
 
     auto device_type = torch::kCUDA;
@@ -1529,6 +1545,18 @@ GaussianModel::GaussianModel(const Params& prm)
         {0, 3}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
     teacher_candidate_base_opacity_ = torch::empty(
         {0, 1}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
+    teacher_candidate_rollout_parameter_ = torch::empty(
+        {0, 14}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
+    teacher_candidate_rollout_visibility_count_ = torch::empty(
+        {0}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
+    teacher_candidate_rollout_gradient_sum_ = torch::empty(
+        {0, 5}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
+    teacher_candidate_rollout_steps_ = torch::empty(
+        {0}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt32));
+    teacher_rollout_capture_rows_ = torch::empty(
+        {0}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt64));
+    teacher_rollout_capture_ids_ = torch::empty(
+        {0}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt64));
     semantic_bundle_features_ = torch::empty(0, torch::TensorOptions().device(torch::kCPU));
     semantic_bundle_features_clean_ = torch::empty(0, torch::TensorOptions().device(torch::kCPU));
     semantic_bundle_mask_ = torch::empty(0, torch::TensorOptions().device(torch::kCPU).dtype(torch::kBool));
@@ -1783,7 +1811,186 @@ torch::Tensor GaussianModel::registerTeacherCandidates(
         {teacher_candidate_base_opacity_,
          base_opacity.detach().to(torch::kCPU).to(torch::kFloat32)},
         0).contiguous();
+    if (teacher_rollout_steps_ > 0)
+    {
+        const auto float_options =
+            torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32);
+        teacher_candidate_rollout_parameter_ = torch::cat(
+            {
+                teacher_candidate_rollout_parameter_,
+                torch::full(
+                    {rows, 14},
+                    std::numeric_limits<float>::quiet_NaN(),
+                    float_options),
+            },
+            0).contiguous();
+        teacher_candidate_rollout_visibility_count_ = torch::cat(
+            {
+                teacher_candidate_rollout_visibility_count_,
+                torch::zeros({rows}, float_options),
+            },
+            0).contiguous();
+        teacher_candidate_rollout_gradient_sum_ = torch::cat(
+            {
+                teacher_candidate_rollout_gradient_sum_,
+                torch::zeros({rows, 5}, float_options),
+            },
+            0).contiguous();
+        teacher_candidate_rollout_steps_ = torch::cat(
+            {
+                teacher_candidate_rollout_steps_,
+                torch::zeros(
+                    {rows},
+                    torch::TensorOptions().device(torch::kCPU)
+                        .dtype(torch::kInt32)),
+            },
+            0).contiguous();
+        teacher_rollout_incomplete_candidates_ += rows;
+    }
     return ids;
+}
+
+void GaussianModel::accumulateTeacherRolloutGradients(
+    const torch::Tensor& visible)
+{
+    if (teacher_rollout_steps_ <= 0 ||
+        teacher_rollout_incomplete_candidates_ <= 0 ||
+        teacher_candidate_rollout_steps_.numel() == 0)
+    {
+        return;
+    }
+    if (!visible.defined() || visible.dim() != 1 ||
+        visible.size(0) != xyz_.size(0))
+    {
+        throw std::runtime_error(
+            "Teacher rollout visibility is not aligned with Gaussians");
+    }
+
+    auto candidate_ids = gaussian_candidate_id_.to(torch::kInt64);
+    auto valid_rows = torch::nonzero(candidate_ids >= 0).squeeze(1);
+    if (valid_rows.numel() == 0)
+    {
+        return;
+    }
+    auto valid_ids = candidate_ids.index_select(0, valid_rows);
+    auto steps_before =
+        teacher_candidate_rollout_steps_.index_select(0, valid_ids);
+    auto active_mask = steps_before < teacher_rollout_steps_;
+    if (!active_mask.any().item<bool>())
+    {
+        return;
+    }
+
+    auto active_rows_cpu = valid_rows.index({active_mask}).contiguous();
+    auto active_ids = valid_ids.index({active_mask}).contiguous();
+    auto active_steps_before = steps_before.index({active_mask});
+    auto active_rows = active_rows_cpu.to(torch::kCUDA);
+    const int64_t active_count = active_rows.size(0);
+
+    auto gradient_norm = [&](const torch::Tensor& parameter)
+    {
+        auto gradient = parameter.grad();
+        if (!gradient.defined())
+        {
+            return torch::zeros(
+                {active_count},
+                torch::TensorOptions().device(torch::kCUDA)
+                    .dtype(torch::kFloat32));
+        }
+        auto selected = gradient.index_select(0, active_rows)
+            .reshape({active_count, -1});
+        return torch::sqrt(
+            (selected * selected).sum(1).clamp_min(0.0f));
+    };
+    auto gradient_groups = torch::stack(
+        {
+            gradient_norm(xyz_),
+            gradient_norm(scaling_),
+            gradient_norm(rotation_),
+            gradient_norm(features_dc_),
+            gradient_norm(opacity_),
+        },
+        1);
+    gradient_groups = torch::nan_to_num(
+        gradient_groups, 0.0, 0.0, 0.0);
+    auto visible_active = visible.index_select(0, active_rows)
+        .to(torch::kFloat32);
+
+    teacher_candidate_rollout_visibility_count_.index_add_(
+        0,
+        active_ids,
+        visible_active.to(torch::kCPU));
+    teacher_candidate_rollout_gradient_sum_.index_add_(
+        0,
+        active_ids,
+        gradient_groups.to(torch::kCPU));
+    teacher_candidate_rollout_steps_.index_put_(
+        {active_ids},
+        active_steps_before + 1);
+
+    auto reached_mask =
+        active_steps_before == teacher_rollout_steps_ - 1;
+    teacher_rollout_capture_rows_ =
+        active_rows_cpu.index({reached_mask}).contiguous();
+    teacher_rollout_capture_ids_ =
+        active_ids.index({reached_mask}).contiguous();
+}
+
+void GaussianModel::finishTeacherRolloutStep()
+{
+    if (teacher_rollout_steps_ <= 0 ||
+        !teacher_rollout_capture_rows_.defined() ||
+        teacher_rollout_capture_rows_.numel() == 0)
+    {
+        return;
+    }
+    auto rows = teacher_rollout_capture_rows_.to(torch::kCUDA);
+    auto current_ids = gaussian_candidate_id_
+        .index_select(0, teacher_rollout_capture_rows_)
+        .to(torch::kInt64);
+    if (!torch::equal(current_ids, teacher_rollout_capture_ids_))
+    {
+        throw std::runtime_error(
+            "Teacher rollout candidate IDs changed before capture");
+    }
+
+    auto rotation = torch::nn::functional::normalize(
+        rotation_.index_select(0, rows),
+        torch::nn::functional::NormalizeFuncOptions().p(2.0).dim(1));
+    auto rgb = (
+        features_dc_.index_select(0, rows).squeeze(1) * C0 + 0.5
+    ).clamp(0.0, 1.0);
+    auto parameter = torch::cat(
+        {
+            xyz_.index_select(0, rows),
+            scaling_.index_select(0, rows),
+            rotation,
+            rgb,
+            opacity_.index_select(0, rows),
+        },
+        1);
+    parameter = torch::nan_to_num(parameter, 0.0, 0.0, 0.0)
+        .to(torch::kCPU).to(torch::kFloat32).contiguous();
+    teacher_candidate_rollout_parameter_.index_copy_(
+        0,
+        teacher_rollout_capture_ids_,
+        parameter);
+
+    std::cout << "[Teacher Rollout] captured "
+              << teacher_rollout_capture_ids_.size(0)
+              << " candidates after " << teacher_rollout_steps_
+              << " render steps" << std::endl;
+    teacher_rollout_incomplete_candidates_ -=
+        teacher_rollout_capture_ids_.size(0);
+    if (teacher_rollout_incomplete_candidates_ < 0)
+    {
+        throw std::runtime_error(
+            "Teacher rollout incomplete candidate count became negative");
+    }
+    teacher_rollout_capture_rows_ = torch::empty(
+        {0}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt64));
+    teacher_rollout_capture_ids_ = torch::empty(
+        {0}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt64));
 }
 
 torch::Tensor GaussianModel::getScaling()
@@ -2812,9 +3019,38 @@ void GaussianModel::saveTeacherDistillationSidecar(
     writeFloat32Npy(
         output_dir / "candidate_base_opacity.npy",
         teacher_candidate_base_opacity_);
+    int64_t rollout_completed_rows = 0;
+    if (teacher_rollout_steps_ > 0)
+    {
+        const int64_t candidate_rows = teacher_candidate_inputs_.size(0);
+        if (teacher_candidate_rollout_parameter_.size(0) != candidate_rows ||
+            teacher_candidate_rollout_visibility_count_.size(0) != candidate_rows ||
+            teacher_candidate_rollout_gradient_sum_.size(0) != candidate_rows ||
+            teacher_candidate_rollout_steps_.size(0) != candidate_rows)
+        {
+            throw std::runtime_error(
+                "Teacher rollout arrays are not aligned with candidate inputs");
+        }
+        writeFloat32Npy(
+            output_dir / "candidate_rollout_parameter.npy",
+            teacher_candidate_rollout_parameter_);
+        writeFloat32Npy(
+            output_dir / "candidate_rollout_visibility_count.npy",
+            teacher_candidate_rollout_visibility_count_);
+        writeFloat32Npy(
+            output_dir / "candidate_rollout_gradient_sum.npy",
+            teacher_candidate_rollout_gradient_sum_);
+        writeInt32Npy(
+            output_dir / "candidate_rollout_steps.npy",
+            teacher_candidate_rollout_steps_);
+        auto completed =
+            torch::isfinite(teacher_candidate_rollout_parameter_).all(1) &
+            (teacher_candidate_rollout_steps_ >= teacher_rollout_steps_);
+        rollout_completed_rows = completed.sum().item<int64_t>();
+    }
     std::ofstream meta(output_dir / "teacher_distillation_info.json");
     meta << "{\n"
-         << "  \"format\": \"r3live-teacher-candidate-v1\",\n"
+         << "  \"format\": \"r3live-teacher-candidate-v2\",\n"
          << "  \"candidate_rows\": " << teacher_candidate_inputs_.size(0) << ",\n"
          << "  \"final_rows\": "
          << gaussian_candidate_id_.size(0) - skybox_points_num_ << ",\n"
@@ -2836,7 +3072,14 @@ void GaussianModel::saveTeacherDistillationSidecar(
          << (semantic_gaussian_prior_lightweight_context_ ? "true" : "false")
          << ",\n"
          << "  \"scaling_space\": \"log\",\n"
-         << "  \"opacity_space\": \"logit\"\n"
+         << "  \"opacity_space\": \"logit\",\n"
+         << "  \"rollout_steps\": " << teacher_rollout_steps_ << ",\n"
+         << "  \"rollout_completed_rows\": "
+         << rollout_completed_rows << ",\n"
+         << "  \"rollout_parameter_layout\": "
+         << "\"xyz3,log_scale3,quaternion4,rgb3,opacity_logit1\",\n"
+         << "  \"rollout_gradient_layout\": "
+         << "\"xyz,log_scale,quaternion,sh_dc,opacity_logit\"\n"
          << "}\n";
     std::cout << "[Teacher Distillation] sidecar saved: "
               << output_dir.string() << std::endl;
@@ -3679,8 +3922,10 @@ double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<Gaussia
         pc->t_start_ = std::chrono::steady_clock::now();
         auto visible = std::get<4>(render_pkg);
         updated_num += visible.sum().item<int>();
+        pc->accumulateTeacherRolloutGradients(visible);
         pc->sparse_optimizer_->set_visibility_and_N(visible, pc->getXYZ().size(0));
         pc->sparse_optimizer_->step();
+        pc->finishTeacherRolloutStep();
         pc->sparse_optimizer_->zero_grad(true);
         if (pc->apply_exposure_)
         {
