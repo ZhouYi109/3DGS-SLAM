@@ -40,7 +40,7 @@ find_package(Eigen3 REQUIRED)
 find_package(Ceres REQUIRED)
 # find_package(Sophus REQUIRED)
 find_package(OpenCV REQUIRED)
-find_package(PCL 1.13.0 REQUIRED)
+find_package(PCL REQUIRED)
 
 # find_package(yaml-cpp REQUIRED)
 find_package(PkgConfig REQUIRED)

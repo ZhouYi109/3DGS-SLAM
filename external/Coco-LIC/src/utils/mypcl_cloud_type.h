@@ -20,7 +20,7 @@
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-#include <pcl/type_traits.h>
+#include <pcl/point_traits.h>
 #include <cmath>
 #include <pcl/filters/voxel_grid.h>
 
@@ -91,14 +91,17 @@ struct PointXYZIRPYT {
 
 }  // namespace my_pcl
 
+namespace pcl { namespace traits {
+}}
+
 // https://github.com/PointCloudLibrary/pcl/issues/3190
 POINT_CLOUD_REGISTER_POINT_STRUCT(my_pcl::PointXYZIRT,           //
                                   (float, x, x)                  //
                                   (float, y, y)                  //
                                   (float, z, z)                  //
                                   (float, intensity, intensity)  //
-                                  (uint16_t, ring, ring)         //
-                                  (int64_t, time, time)            //
+                                  (std::uint16_t, ring, ring)         //
+                                  (double, time, time)            //
 )
 
 POINT_CLOUD_REGISTER_POINT_STRUCT(my_pcl::PointXYZIRTTmp,           //
@@ -106,7 +109,7 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(my_pcl::PointXYZIRTTmp,           //
                                   (float, y, y)                  //
                                   (float, z, z)                  //
                                   (float, intensity, intensity)  //
-                                  (uint16_t, ring, ring)         //
+                                  (std::uint16_t, ring, ring)         //
                                   (float, time, time)            //
 )
 
@@ -115,7 +118,7 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(my_pcl::PointXYZIRTTmpHesai,           //
                                   (float, y, y)                  //
                                   (float, z, z)                  //
                                   (float, intensity, intensity)  //
-                                  (uint16_t, ring, ring)         //
+                                  (std::uint16_t, ring, ring)         //
                                   (double, timestamp, timestamp)            //
 )
 
@@ -124,22 +127,22 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(my_pcl::OusterPointXYZIRT,              //
                                   (float, y, y)                           //
                                   (float, z, z)                           //
                                   (float, intensity, intensity)           //
-                                  (int64_t, t, t)                        //
-                                  (uint16_t, reflectivity, reflectivity)  //
-                                  (uint8_t, ring, ring)                   //
+                                  (double, t, t)                        //
+                                  (std::uint16_t, reflectivity, reflectivity)  //
+                                  (std::uint8_t, ring, ring)                   //
                                   // (uint16_t, ambient, ambient)            //
-                                  (uint32_t, range, range))               //
+                                  (std::uint32_t, range, range))               //
 
 POINT_CLOUD_REGISTER_POINT_STRUCT(my_pcl::OusterPointXYZIRTTmp,              //
                                   (float, x, x)                           //
                                   (float, y, y)                           //
                                   (float, z, z)                           //
                                   (float, intensity, intensity)           //
-                                  (uint32_t, t, t)                        //
-                                  (uint16_t, reflectivity, reflectivity)  //
-                                  (uint8_t, ring, ring)                   //
+                                  (std::uint32_t, t, t)                        //
+                                  (std::uint16_t, reflectivity, reflectivity)  //
+                                  (std::uint8_t, ring, ring)                   //
                                   // (uint16_t, ambient, ambient)            //
-                                  (uint32_t, range, range))               //
+                                  (std::uint32_t, range, range))               //
 
 POINT_CLOUD_REGISTER_POINT_STRUCT(my_pcl::PointXYZT,              //
                                   (float, x, x)                   //

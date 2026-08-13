@@ -6,7 +6,7 @@ cx: 320.3404
 cy: 259.1696
 
 select_every_k_frame: 5
-depth_completion: true
+depth_completion: false
 patch_size: 10
 max_depth: 20
 

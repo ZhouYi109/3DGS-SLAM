@@ -45,8 +45,7 @@ int main(int argc, char **argv) {
   const auto run_start = std::chrono::steady_clock::now();
   odom_manager.RunBag();
   const auto run_end = std::chrono::steady_clock::now();
-  const double run_seconds =
-      std::chrono::duration<double>(run_end - run_start).count();
+  const double run_seconds = std::chrono::duration<double>(run_end - run_start).count();
   std::cout << "\n[Coco Timing] RunBag wall_seconds=" << run_seconds << std::endl;
 
   double t_traj_max = odom_manager.SaveOdometry();
