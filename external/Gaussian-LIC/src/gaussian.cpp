@@ -2219,6 +2219,130 @@ void GaussianModel::syncSemanticMemory(const Dataset& dataset)
     semantic_memory_revision_ = dataset.semantic_memory_revision_;
 }
 
+int64_t GaussianModel::backfillObjectGrid(
+    const sensor_msgs::PointCloud2ConstPtr& semantic_grid_msg,
+    const Eigen::Matrix3d& R_wc,
+    const Eigen::Vector3d& t_wc,
+    double fx, double fy, double cx, double cy,
+    int image_width, int image_height,
+    const std::vector<float>& depth_grid,
+    int depth_grid_rows, int depth_grid_cols,
+    float confidence_threshold, float depth_tolerance, int max_gaussians)
+{
+    DecodedSemanticGrid grid;
+    std::string error;
+    if (!decodeSemanticGrid(semantic_grid_msg, grid, error) ||
+        !grid.has_object_ids || grid.rows <= 0 || grid.cols <= 0 ||
+        xyz_.numel() == 0 || image_width <= 0 || image_height <= 0)
+    {
+        ROS_WARN_STREAM_THROTTLE(
+            2.0, "[Online Semantic] backfill rejected object grid: " << error);
+        return 0;
+    }
+    if (depth_grid_rows != grid.rows || depth_grid_cols != grid.cols ||
+        depth_grid.size() != static_cast<std::size_t>(grid.rows * grid.cols))
+    {
+        ROS_WARN_STREAM_THROTTLE(
+            2.0, "[Online Semantic] backfill depth-grid layout does not match object grid");
+        return 0;
+    }
+
+    const int64_t gaussian_rows = xyz_.size(0);
+    if (!online_semantic_initialized_)
+    {
+        // Object IDs are useful before a compact feature bank is available.
+        // This allocates metadata only and never creates optimization variables.
+        online_semantic_dim_ = 0;
+        online_semantic_source_dim_ = 0;
+        semantic_memory_bank_ = torch::empty(
+            {0, 0}, torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCPU));
+        semantic_projection_ = torch::empty(
+            {0, 0}, torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCPU));
+        ensureOnlineSemanticCapacity(gaussian_rows);
+        refreshOnlineSemanticViews(gaussian_rows);
+        online_semantic_initialized_ = true;
+    }
+    else if (online_semantic_features_.size(0) != gaussian_rows)
+    {
+        ensureOnlineSemanticCapacity(gaussian_rows);
+        refreshOnlineSemanticViews(gaussian_rows);
+    }
+
+    const int64_t stride = std::max<int64_t>(
+        1, (gaussian_rows + std::max(1, max_gaussians) - 1) /
+               std::max(1, max_gaussians));
+    const auto xyz_cpu = xyz_.detach().to(torch::kCPU).contiguous();
+    const auto xyz_accessor = xyz_cpu.accessor<float, 2>();
+    std::vector<int64_t> updated_indices;
+    std::vector<int32_t> updated_ids;
+    std::vector<float> updated_confidence;
+    std::vector<float> updated_risk;
+    updated_indices.reserve(static_cast<std::size_t>(gaussian_rows / stride + 1));
+
+    const Eigen::Matrix3d R_cw = R_wc.transpose();
+    for (int64_t index = 0; index < gaussian_rows; index += stride)
+    {
+        const Eigen::Vector3d point_world(
+            xyz_accessor[index][0], xyz_accessor[index][1], xyz_accessor[index][2]);
+        const Eigen::Vector3d point_camera = R_cw * (point_world - t_wc);
+        if (!point_camera.allFinite() || point_camera.z() <= 1e-4)
+        {
+            continue;
+        }
+        const double u = fx * point_camera.x() / point_camera.z() + cx;
+        const double v = fy * point_camera.y() / point_camera.z() + cy;
+        if (u < 0.0 || v < 0.0 || u >= image_width || v >= image_height)
+        {
+            continue;
+        }
+        const int col = std::min(
+            grid.cols - 1,
+            std::max(0, static_cast<int>(u * grid.cols / image_width)));
+        const int row = std::min(
+            grid.rows - 1,
+            std::max(0, static_cast<int>(v * grid.rows / image_height)));
+        const std::size_t cell = static_cast<std::size_t>(row * grid.cols + col);
+        const int32_t object_id = grid.object_ids[cell];
+        const float confidence = grid.confidence[cell];
+        const float reference_depth = depth_grid[cell];
+        if (object_id < 0 || confidence < confidence_threshold ||
+            !std::isfinite(reference_depth) || reference_depth <= 0.0f ||
+            std::abs(static_cast<float>(point_camera.z()) - reference_depth) >
+                std::max(depth_tolerance, 0.1f * reference_depth))
+        {
+            continue;
+        }
+        updated_indices.push_back(index);
+        updated_ids.push_back(object_id);
+        updated_confidence.push_back(confidence);
+        updated_risk.push_back(grid.risk[cell]);
+    }
+    if (updated_indices.empty()) return 0;
+
+    auto index_tensor = torch::from_blob(
+        updated_indices.data(), {static_cast<int64_t>(updated_indices.size())},
+        torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU)).clone();
+    auto id_tensor = torch::from_blob(
+        updated_ids.data(), {static_cast<int64_t>(updated_ids.size())},
+        torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU)).clone();
+    auto confidence_tensor = torch::from_blob(
+        updated_confidence.data(), {static_cast<int64_t>(updated_confidence.size())},
+        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU)).clone();
+    auto risk_tensor = torch::from_blob(
+        updated_risk.data(), {static_cast<int64_t>(updated_risk.size())},
+        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU)).clone();
+    online_semantic_memory_index_storage_.index_put_({index_tensor}, id_tensor);
+    online_semantic_confidence_storage_.index_put_({index_tensor}, confidence_tensor);
+    online_semantic_risk_storage_.index_put_({index_tensor}, risk_tensor);
+    online_semantic_observation_count_storage_.index_put_(
+        {index_tensor}, online_semantic_observation_count_.index({index_tensor}) + 1);
+    online_semantic_mask_storage_.index_put_(
+        {index_tensor}, torch::ones(
+            {static_cast<int64_t>(updated_indices.size())},
+            torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU)));
+    return static_cast<int64_t>(updated_indices.size());
+}
+
 void GaussianModel::refreshOnlineSemanticViews(int64_t logical_rows)
 {
     if (logical_rows < 0 || logical_rows > online_semantic_capacity_)

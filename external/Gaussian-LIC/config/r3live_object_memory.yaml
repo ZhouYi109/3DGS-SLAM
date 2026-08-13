@@ -25,6 +25,15 @@ semantic_compact_dim: 0
 semantic_memory_similarity_threshold: 0.90
 semantic_projection_seed: 20260813
 semantic_storage_growth_rows: 1024
+# Late object grids are projected into existing Gaussians using the closest
+# timestamped camera pose and a compact depth grid for occlusion gating.
+semantic_backfill_enabled: true
+semantic_backfill_history_sec: 30.0
+semantic_backfill_match_tolerance_sec: 0.05
+semantic_backfill_depth_tolerance: 1.0
+semantic_backfill_max_gaussians: 250000
+semantic_backfill_grid_rows: 16
+semantic_backfill_grid_cols: 20
 
 sh_degree: 3
 white_background: false

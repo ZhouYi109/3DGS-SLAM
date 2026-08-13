@@ -27,6 +27,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <deque>
 #include <termios.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -61,15 +62,60 @@ std::atomic<long long> semantic_missed_pending_frames(0);
 std::atomic<long long> semantic_feature_replaced_messages(0);
 std::atomic<long long> semantic_delta_replaced_messages(0);
 std::atomic<long long> semantic_pending_replaced_messages(0);
+std::atomic<long long> semantic_backfill_messages(0);
+std::atomic<long long> semantic_backfill_matched_messages(0);
+std::atomic<long long> semantic_backfill_updated_gaussians(0);
+std::atomic<long long> semantic_backfill_unmatched_messages(0);
 ros::Publisher semantic_compute_grant_pub;
 double last_semantic_compute_grant_stamp = -1.0;
 
 namespace
 {
+struct SemanticHistoryFrame
+{
+    double stamp = 0.0;
+    Eigen::Matrix3d R_wc = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d t_wc = Eigen::Vector3d::Zero();
+    int width = 0;
+    int height = 0;
+    std::vector<float> depth_grid;
+};
+
 long long wallTimeNs()
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+SemanticHistoryFrame makeSemanticHistoryFrame(
+    const Frame& frame, int rows, int cols)
+{
+    SemanticHistoryFrame history;
+    history.stamp = frame.image_msg->header.stamp.toSec();
+    Eigen::Quaterniond q_wc;
+    tf::quaternionMsgToEigen(frame.pose_msg->pose.orientation, q_wc);
+    tf::pointMsgToEigen(frame.pose_msg->pose.position, history.t_wc);
+    history.R_wc = q_wc.toRotationMatrix();
+    auto depth_ptr = cv_bridge::toCvCopy(
+        frame.depth_msg, sensor_msgs::image_encodings::TYPE_32FC1);
+    const cv::Mat& depth = depth_ptr->image;
+    history.width = depth.cols;
+    history.height = depth.rows;
+    history.depth_grid.assign(static_cast<std::size_t>(rows * cols), 0.0f);
+    for (int row = 0; row < rows; ++row)
+    {
+        const int y = std::min(depth.rows - 1, (row * depth.rows) / rows + depth.rows / (2 * rows));
+        for (int col = 0; col < cols; ++col)
+        {
+            const int x = std::min(depth.cols - 1, (col * depth.cols) / cols + depth.cols / (2 * cols));
+            const float value = depth.at<float>(y, x);
+            if (std::isfinite(value) && value > 0.0f)
+            {
+                history.depth_grid[static_cast<std::size_t>(row * cols + col)] = value;
+            }
+        }
+    }
+    return history;
 }
 
 void popPointFront()
@@ -351,7 +397,8 @@ bool getAlignedData(Frame& cur_frame)
     sensor_msgs::PointCloud2ConstPtr cur_semantic;
     sensor_msgs::PointCloud2ConstPtr cur_semantic_object_feature_delta;
     bool cur_semantic_pending_target = false;
-    if (online_semantic_enabled && !semantic_feature_buf.empty())
+    if (online_semantic_enabled && semantic_wait_timeout_sec.load() > 0.0 &&
+        !semantic_feature_buf.empty())
     {
         const double tolerance = semantic_sync_tolerance_sec.load();
         while (!semantic_feature_buf.empty() &&
@@ -465,6 +512,53 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     }
     std::shared_ptr<GaussianModel> gaussians = std::make_shared<GaussianModel>(prm);
     std::shared_ptr<Dataset> dataset = std::make_shared<Dataset>(prm);
+    std::deque<SemanticHistoryFrame> semantic_history;
+    auto processLateSemantic = [&]()
+    {
+        if (!prm.semantic_backfill_enabled || semantic_history.empty() ||
+            !gaussians->is_init_)
+        {
+            return;
+        }
+        sensor_msgs::PointCloud2ConstPtr message;
+        {
+            std::lock_guard<std::mutex> lock(m_buf);
+            if (semantic_feature_buf.empty()) return;
+            const double newest_stamp = semantic_history.back().stamp;
+            if (semantic_feature_buf.front()->header.stamp.toSec() >
+                newest_stamp + prm.semantic_backfill_match_tolerance_sec)
+            {
+                return;
+            }
+            message = semantic_feature_buf.front();
+            semantic_feature_buf.pop();
+        }
+        semantic_backfill_messages.fetch_add(1);
+        const double stamp = message->header.stamp.toSec();
+        const auto nearest = std::min_element(
+            semantic_history.begin(), semantic_history.end(),
+            [stamp](const SemanticHistoryFrame& lhs, const SemanticHistoryFrame& rhs)
+            {
+                return std::abs(lhs.stamp - stamp) < std::abs(rhs.stamp - stamp);
+            });
+        if (nearest == semantic_history.end() ||
+            std::abs(nearest->stamp - stamp) >
+                prm.semantic_backfill_match_tolerance_sec)
+        {
+            semantic_backfill_unmatched_messages.fetch_add(1);
+            return;
+        }
+        const int64_t updated = gaussians->backfillObjectGrid(
+            message, nearest->R_wc, nearest->t_wc,
+            dataset->fx_, dataset->fy_, dataset->cx_, dataset->cy_,
+            nearest->width, nearest->height, nearest->depth_grid,
+            prm.semantic_backfill_grid_rows, prm.semantic_backfill_grid_cols,
+            dataset->semantic_confidence_threshold_,
+            static_cast<float>(prm.semantic_backfill_depth_tolerance),
+            prm.semantic_backfill_max_gaussians);
+        semantic_backfill_matched_messages.fetch_add(1);
+        semantic_backfill_updated_gaussians.fetch_add(updated);
+    };
     if (!prm.semantic_bundle_path.empty())
     {
         try
@@ -506,11 +600,29 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         m_buf.lock();
         bool align_flag = getAlignedData(cur_frame);
         m_buf.unlock();
-        if (!align_flag) continue;
+        if (!align_flag)
+        {
+            processLateSemantic();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
         
         /// [2] add every frame
         t_start = std::chrono::steady_clock::now();
         dataset->addFrame(cur_frame);
+        if (prm.semantic_backfill_enabled)
+        {
+            semantic_history.emplace_back(makeSemanticHistoryFrame(
+                cur_frame, prm.semantic_backfill_grid_rows,
+                prm.semantic_backfill_grid_cols));
+            const double oldest_allowed = semantic_history.back().stamp -
+                std::max(0.0, prm.semantic_backfill_history_sec);
+            while (!semantic_history.empty() &&
+                   semantic_history.front().stamp < oldest_allowed)
+            {
+                semantic_history.pop_front();
+            }
+        }
         torch::cuda::synchronize();
         t_end = std::chrono::steady_clock::now();
         if (dataset->is_keyframe_current_)
@@ -539,6 +651,10 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
             t_end = std::chrono::steady_clock::now();
             total_extending_time += std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
         }
+
+        // Apply one late semantic observation after geometry is stable for this
+        // keyframe. The update writes metadata only; no optimizer state changes.
+        processLateSemantic();
 
         /// [5] optimize map
         t_start = std::chrono::steady_clock::now();
@@ -631,7 +747,12 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
                   << ", delta_replaced="
                   << semantic_delta_replaced_messages.load()
                   << ", pending_replaced="
-                  << semantic_pending_replaced_messages.load() << std::endl;
+                  << semantic_pending_replaced_messages.load()
+                  << ", backfill_messages=" << semantic_backfill_messages.load()
+                  << ", backfill_matched=" << semantic_backfill_matched_messages.load()
+                  << ", backfill_unmatched=" << semantic_backfill_unmatched_messages.load()
+                  << ", backfill_gaussians=" << semantic_backfill_updated_gaussians.load()
+                  << std::endl;
     }
     torch::NoGradGuard no_grad;
     const auto evaluation_start = std::chrono::steady_clock::now();

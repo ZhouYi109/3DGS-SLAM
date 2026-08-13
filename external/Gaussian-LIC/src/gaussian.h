@@ -199,6 +199,22 @@ public:
 
     void initialize(const std::shared_ptr<Dataset>& dataset);
     void syncSemanticMemory(const Dataset& dataset);
+    int64_t backfillObjectGrid(
+        const sensor_msgs::PointCloud2ConstPtr& semantic_grid_msg,
+        const Eigen::Matrix3d& R_wc,
+        const Eigen::Vector3d& t_wc,
+        double fx,
+        double fy,
+        double cx,
+        double cy,
+        int image_width,
+        int image_height,
+        const std::vector<float>& depth_grid,
+        int depth_grid_rows,
+        int depth_grid_cols,
+        float confidence_threshold,
+        float depth_tolerance,
+        int max_gaussians);
     void saveMap(const std::string& result_path);
     void saveMapFile(const std::string& output_path);
     void saveSemanticSidecar(const std::string& result_path);

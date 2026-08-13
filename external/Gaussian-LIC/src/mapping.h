@@ -91,6 +91,13 @@ public:
         semantic_memory_similarity_threshold = node["semantic_memory_similarity_threshold"] ? node["semantic_memory_similarity_threshold"].as<double>() : 0.9;
         semantic_projection_seed = node["semantic_projection_seed"] ? node["semantic_projection_seed"].as<int>() : 20260726;
         semantic_storage_growth_rows = node["semantic_storage_growth_rows"] ? node["semantic_storage_growth_rows"].as<int>() : 32768;
+        semantic_backfill_enabled = node["semantic_backfill_enabled"] ? node["semantic_backfill_enabled"].as<bool>() : false;
+        semantic_backfill_history_sec = node["semantic_backfill_history_sec"] ? node["semantic_backfill_history_sec"].as<double>() : 30.0;
+        semantic_backfill_match_tolerance_sec = node["semantic_backfill_match_tolerance_sec"] ? node["semantic_backfill_match_tolerance_sec"].as<double>() : 0.05;
+        semantic_backfill_depth_tolerance = node["semantic_backfill_depth_tolerance"] ? node["semantic_backfill_depth_tolerance"].as<double>() : 1.0;
+        semantic_backfill_max_gaussians = node["semantic_backfill_max_gaussians"] ? node["semantic_backfill_max_gaussians"].as<int>() : 250000;
+        semantic_backfill_grid_rows = node["semantic_backfill_grid_rows"] ? node["semantic_backfill_grid_rows"].as<int>() : 16;
+        semantic_backfill_grid_cols = node["semantic_backfill_grid_cols"] ? node["semantic_backfill_grid_cols"].as<int>() : 20;
         semantic_gaussian_prior_enabled = node["semantic_gaussian_prior_enabled"] ? node["semantic_gaussian_prior_enabled"].as<bool>() : false;
         semantic_gaussian_prior_model_path = node["semantic_gaussian_prior_model_path"] ? node["semantic_gaussian_prior_model_path"].as<std::string>() : "";
         semantic_gaussian_prior_strategy = node["semantic_gaussian_prior_strategy"] ? node["semantic_gaussian_prior_strategy"].as<std::string>() : "full";
@@ -173,6 +180,13 @@ public:
     double semantic_memory_similarity_threshold;
     int semantic_projection_seed;
     int semantic_storage_growth_rows;
+    bool semantic_backfill_enabled;
+    double semantic_backfill_history_sec;
+    double semantic_backfill_match_tolerance_sec;
+    double semantic_backfill_depth_tolerance;
+    int semantic_backfill_max_gaussians;
+    int semantic_backfill_grid_rows;
+    int semantic_backfill_grid_cols;
     bool semantic_gaussian_prior_enabled;
     std::string semantic_gaussian_prior_model_path;
     std::string semantic_gaussian_prior_strategy;
