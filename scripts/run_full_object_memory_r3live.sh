@@ -47,13 +47,16 @@ case "${config_mode}" in
     r3live_teacher)
         paper_config="${gaussian_root}/config/r3live_teacher.yaml"
         ;;
+    r3live_object_memory)
+        paper_config="${gaussian_root}/config/r3live_object_memory.yaml"
+        ;;
     *)
         echo "Unsupported config mode: ${config_mode}" >&2
         exit 2
         ;;
 esac
 case "${config_mode}" in
-    r3live_prior)
+    r3live_prior|r3live_object_memory)
         default_residual_optimization_iters=20
         ;;
     *)
@@ -80,7 +83,8 @@ esac
 if [ "${frontend_mode}" = "backend_contract" ] \
     && [ "${config_mode}" != "r3live_paper" ] \
     && [ "${config_mode}" != "r3live_prior" ] \
-    && [ "${config_mode}" != "r3live_teacher" ]; then
+    && [ "${config_mode}" != "r3live_teacher" ] \
+    && [ "${config_mode}" != "r3live_object_memory" ]; then
     echo "backend_contract requires an undistorted R3LIVE K=431 config; refusing mismatched Gaussian intrinsics." >&2
     exit 2
 fi
@@ -127,6 +131,13 @@ fi
 if [ "${config_mode}" = "r3live_teacher" ]; then
     if [ "${semantic_mode}" != "object" ]; then
         echo "r3live_teacher requires semantic_mode=object." >&2
+        exit 2
+    fi
+    online_semantic_enabled=true
+fi
+if [ "${config_mode}" = "r3live_object_memory" ]; then
+    if [ "${semantic_mode}" != "object" ]; then
+        echo "r3live_object_memory requires semantic_mode=object." >&2
         exit 2
     fi
     online_semantic_enabled=true

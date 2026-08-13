@@ -88,11 +88,13 @@ class ObjectMemoryTest(unittest.TestCase):
             npz_path, json_path = memory.save(str(Path(directory) / "memory"))
             self.assertTrue(Path(npz_path).exists())
             self.assertTrue(Path(json_path).exists())
-            payload = np.load(npz_path)
-            self.assertEqual(payload["features"].shape, (2, 3))
-            self.assertEqual(payload["query_features"].shape, (2, 3))
-            self.assertEqual(payload["object_latents"].shape, (2, 3))
-            self.assertEqual(payload["centroids"].shape, (2, 3))
+            # Explicitly close the archive so TemporaryDirectory cleanup also
+            # works on Windows, where open files cannot be unlinked.
+            with np.load(npz_path) as payload:
+                self.assertEqual(payload["features"].shape, (2, 3))
+                self.assertEqual(payload["query_features"].shape, (2, 3))
+                self.assertEqual(payload["object_latents"].shape, (2, 3))
+                self.assertEqual(payload["centroids"].shape, (2, 3))
 
 
 if __name__ == "__main__":

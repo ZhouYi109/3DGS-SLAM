@@ -58,6 +58,9 @@ std::atomic<long long> semantic_aligned_frames(0);
 std::atomic<long long> semantic_timeout_frames(0);
 std::atomic<long long> semantic_bypass_frames(0);
 std::atomic<long long> semantic_missed_pending_frames(0);
+std::atomic<long long> semantic_feature_replaced_messages(0);
+std::atomic<long long> semantic_delta_replaced_messages(0);
+std::atomic<long long> semantic_pending_replaced_messages(0);
 ros::Publisher semantic_compute_grant_pub;
 double last_semantic_compute_grant_stamp = -1.0;
 
@@ -159,6 +162,13 @@ void depthCallback(const sensor_msgs::ImageConstPtr& depth_msg)
 void semanticFeatureCallback(const sensor_msgs::PointCloud2ConstPtr& semantic_msg)
 {
     std::lock_guard<std::mutex> lock(m_buf);
+    // Semantic inference is asynchronous. Keep only the newest result so it
+    // cannot accumulate latency or backpressure the mapping pipeline.
+    if (!semantic_feature_buf.empty())
+    {
+        semantic_feature_buf.pop();
+        semantic_feature_replaced_messages.fetch_add(1);
+    }
     semantic_feature_buf.push(semantic_msg);
 }
 
@@ -166,12 +176,22 @@ void semanticObjectFeatureDeltaCallback(
     const sensor_msgs::PointCloud2ConstPtr& semantic_memory_msg)
 {
     std::lock_guard<std::mutex> lock(m_buf);
+    if (!semantic_object_feature_delta_buf.empty())
+    {
+        semantic_object_feature_delta_buf.pop();
+        semantic_delta_replaced_messages.fetch_add(1);
+    }
     semantic_object_feature_delta_buf.push(semantic_memory_msg);
 }
 
 void semanticPendingCallback(const std_msgs::HeaderConstPtr& pending_msg)
 {
     std::lock_guard<std::mutex> lock(m_buf);
+    if (!semantic_pending_buf.empty())
+    {
+        semantic_pending_buf.pop();
+        semantic_pending_replaced_messages.fetch_add(1);
+    }
     semantic_pending_buf.push(pending_msg);
 }
 
@@ -388,22 +408,21 @@ bool getAlignedData(Frame& cur_frame)
     cur_frame.semantic_object_feature_delta_msg =
         cur_semantic_object_feature_delta;
 
-    if (semantic_wait_timeout_sec.load() > 0.0)
+    if (online_semantic_enabled)
     {
         const bool complete_semantic =
             cur_semantic &&
             (!semantic_feature_delta_required.load() ||
              cur_semantic_object_feature_delta);
-        if (!semantic_wait_pending_only.load() || cur_semantic_pending_target)
+        const bool semantic_target =
+            !semantic_wait_pending_only.load() || cur_semantic_pending_target;
+        if (complete_semantic)
         {
-            if (complete_semantic)
-            {
-                semantic_aligned_frames.fetch_add(1);
-            }
-            else
-            {
-                semantic_timeout_frames.fetch_add(1);
-            }
+            semantic_aligned_frames.fetch_add(1);
+        }
+        else if (semantic_wait_timeout_sec.load() > 0.0 && semantic_target)
+        {
+            semantic_timeout_frames.fetch_add(1);
         }
         else
         {
@@ -594,7 +613,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     std::cout << std::fixed << std::setprecision(2) << "         4) CPU2GPU " << gaussians->t_tocuda_ << "s" << std::endl;
     std::cout << std::fixed << std::setprecision(2) << "        [Total Adding Time] " << total_adding_time << "s" << std::endl;
     std::cout << std::fixed << std::setprecision(2) << "        [Total Extending Time] " << total_extending_time << "s" << std::endl;
-    if (prm.semantic_wait_timeout_sec > 0.0)
+    if (prm.online_semantic_enabled)
     {
         std::cout << "        [Semantic Async Alignment] matched="
                   << semantic_aligned_frames.load() << ", timeout="
@@ -606,7 +625,13 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
                   << ", pending_grace_sec="
                   << prm.semantic_pending_grace_sec
                   << ", wait_timeout_sec="
-                  << prm.semantic_wait_timeout_sec << std::endl;
+                  << prm.semantic_wait_timeout_sec
+                  << ", feature_replaced="
+                  << semantic_feature_replaced_messages.load()
+                  << ", delta_replaced="
+                  << semantic_delta_replaced_messages.load()
+                  << ", pending_replaced="
+                  << semantic_pending_replaced_messages.load() << std::endl;
     }
     torch::NoGradGuard no_grad;
     const auto evaluation_start = std::chrono::steady_clock::now();
@@ -915,13 +940,13 @@ int main(int argc, char** argv)
     if (online_semantic)
     {
         sub_semantic_feature = nh.subscribe(
-            semantic_feature_topic, 1000, semanticFeatureCallback);
+            semantic_feature_topic, 1, semanticFeatureCallback);
         sub_semantic_object_feature_delta = nh.subscribe(
             semantic_object_feature_delta_topic,
-            1000,
+            1,
             semanticObjectFeatureDeltaCallback);
         sub_semantic_pending = nh.subscribe(
-            semantic_pending_topic, 1000, semanticPendingCallback);
+            semantic_pending_topic, 1, semanticPendingCallback);
         semantic_compute_grant_pub =
             nh.advertise<std_msgs::Header>(semantic_compute_grant_topic, 10);
     }

@@ -211,6 +211,11 @@ class ObjectSemanticMemoryNode:
         self.worker_busy = False
         self.shutdown = False
         self.last_inference_wall = 0.0
+        self.received_frames = 0
+        self.rate_limited_frames = 0
+        self.replaced_frames = 0
+        self.deferred_evicted_frames = 0
+        self.failed_frames = 0
         self.processed_frames = 0
         rospy.set_param("~deferred_complete", False)
 
@@ -289,18 +294,24 @@ class ObjectSemanticMemoryNode:
     ) -> None:
         now = time.monotonic()
         with self.lock:
+            self.received_frames += 1
             if now - self.last_inference_wall < 1.0 / self.args.max_fps:
+                self.rate_limited_frames += 1
                 return
             self.last_inference_wall = now
-            packet = (image_msg, depth_msg, pose_msg)
+            packet = (image_msg, depth_msg, pose_msg, now)
             if self.args.scheduling_mode == "deferred":
                 # Cache a bounded temporal sample without running either model.
+                if len(self.deferred_packets) == self.deferred_packets.maxlen:
+                    self.deferred_evicted_frames += 1
                 self.deferred_packets.append(packet)
                 self.deferred_complete = False
                 rospy.set_param("~deferred_complete", False)
                 return
             # The single-slot queue always keeps the newest eligible keyframe.
             # Semantic inference can lag without creating backpressure on SLAM.
+            if self.pending_packet is not None:
+                self.replaced_frames += 1
             self.pending_packet = packet
             self.pending_granted = self.args.scheduling_mode == "independent"
             self.pending_selected_wall = now
@@ -521,11 +532,12 @@ class ObjectSemanticMemoryNode:
         return len(output.data)
 
     def process(self, packet) -> None:
-        image_msg, depth_msg, pose_msg = packet
+        image_msg, depth_msg, pose_msg, selected_wall = packet
+        started = time.monotonic()
         image = decode_color_image(image_msg)
         depth = decode_depth_image(depth_msg)
         encoder = self.ensure_encoder()
-        started = time.monotonic()
+        inference_started = time.monotonic()
         masks, features = encoder.propose_and_encode(image, self.args)
         if not masks:
             rospy.logwarn_throttle(5.0, "SAM2 produced no accepted object masks")
@@ -559,7 +571,14 @@ class ObjectSemanticMemoryNode:
             "processed_frames": self.processed_frames,
             "instance_count": len(observations),
             "object_count": len(self.memory.nodes),
-            "latency_sec": time.monotonic() - started,
+            "queue_delay_sec": inference_started - selected_wall,
+            "inference_latency_sec": time.monotonic() - inference_started,
+            "total_latency_sec": time.monotonic() - started,
+            "received_frames": self.received_frames,
+            "rate_limited_frames": self.rate_limited_frames,
+            "replaced_frames": self.replaced_frames,
+            "deferred_evicted_frames": self.deferred_evicted_frames,
+            "failed_frames": self.failed_frames,
             "grid_payload_bytes": grid_bytes,
             "latent_delta_payload_bytes": latent_delta_bytes,
             "object_latent_dim": self.latent_encoder.latent_dim,
@@ -570,12 +589,17 @@ class ObjectSemanticMemoryNode:
             String(data=json.dumps(diagnostics, separators=(",", ":")))
         )
         rospy.loginfo(
-            "[ObjectMemory] frame=%d instances=%d objects=%d latency=%.3fs "
+            "[ObjectMemory] frame=%d instances=%d objects=%d queue=%.3fs "
+            "inference=%.3fs total=%.3fs dropped=%d replaced=%d "
             "grid_bytes=%d latent_delta_bytes=%d",
             self.processed_frames,
             len(observations),
             len(self.memory.nodes),
-            diagnostics["latency_sec"],
+            diagnostics["queue_delay_sec"],
+            diagnostics["inference_latency_sec"],
+            diagnostics["total_latency_sec"],
+            diagnostics["rate_limited_frames"],
+            diagnostics["replaced_frames"],
             grid_bytes,
             latent_delta_bytes,
         )
@@ -630,6 +654,8 @@ class ObjectSemanticMemoryNode:
             try:
                 self.process(packet)
             except Exception as exc:
+                with self.lock:
+                    self.failed_frames += 1
                 rospy.logwarn_throttle(5.0, "Object semantic memory update failed: %s", exc)
             finally:
                 with self.lock:
