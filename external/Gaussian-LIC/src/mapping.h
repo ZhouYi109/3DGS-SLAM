@@ -110,6 +110,10 @@ public:
         semantic_gaussian_prior_color_residual_limit = node["semantic_gaussian_prior_color_residual_limit"] ? node["semantic_gaussian_prior_color_residual_limit"].as<double>() : 0.25;
         semantic_gaussian_prior_opacity_logit_limit = node["semantic_gaussian_prior_opacity_logit_limit"] ? node["semantic_gaussian_prior_opacity_logit_limit"].as<double>() : 2.0;
         residual_optimization_iters = node["residual_optimization_iters"] ? node["residual_optimization_iters"].as<int>() : 100;
+        p1_enabled = node["p1_enabled"] ? node["p1_enabled"].as<bool>() : false;
+        p1_mode = node["p1_mode"] ? node["p1_mode"].as<std::string>() : "full";
+        p1_light_iters = node["p1_light_iters"] ? node["p1_light_iters"].as<int>() : 5;
+        p1_full_iters = node["p1_full_iters"] ? node["p1_full_iters"].as<int>() : residual_optimization_iters;
         evaluation_save_images = node["evaluation_save_images"] ? node["evaluation_save_images"].as<bool>() : true;
         teacher_distillation_export_enabled = node["teacher_distillation_export_enabled"] ? node["teacher_distillation_export_enabled"].as<bool>() : false;
         teacher_rollout_steps = node["teacher_rollout_steps"] ? node["teacher_rollout_steps"].as<int>() : 0;
@@ -199,6 +203,10 @@ public:
     double semantic_gaussian_prior_color_residual_limit;
     double semantic_gaussian_prior_opacity_logit_limit;
     int residual_optimization_iters;
+    bool p1_enabled;
+    std::string p1_mode;
+    int p1_light_iters;
+    int p1_full_iters;
     bool evaluation_save_images;
     bool teacher_distillation_export_enabled;
     int teacher_rollout_steps;

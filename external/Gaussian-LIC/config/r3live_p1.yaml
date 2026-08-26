@@ -1,0 +1,72 @@
+# P1: Reliability-calibrated hybrid feed-forward Gaussian-LIC.
+# This first-stage configuration only enables deterministic keyframe budgets
+# and telemetry. Semantic modules and the rejected Semantic Prior stay off.
+width: 640
+height: 512
+fx: 431.71205
+fy: 431.70855
+cx: 320.3404
+cy: 259.1696
+
+select_every_k_frame: 5
+depth_completion: false
+patch_size: 10
+max_depth: 20
+checkpoint_every_keyframes: 0
+
+online_semantic_enabled: false
+semantic_feature_topic: "/semantic_feature_grid"
+semantic_sync_tolerance_sec: 0.02
+semantic_wait_timeout_sec: 0.0
+semantic_confidence_threshold: 0.05
+semantic_compact_dim: 0
+semantic_memory_similarity_threshold: 0.90
+semantic_projection_seed: 20260726
+semantic_storage_growth_rows: 32768
+prune_every_keyframes: 0
+prune_opacity_threshold: 0.0
+
+semantic_gaussian_prior_enabled: false
+semantic_gaussian_prior_model_path: ""
+semantic_gaussian_prior_strategy: "full"
+semantic_gaussian_prior_input_dim: 24
+semantic_gaussian_prior_context_gain: 1.0
+semantic_gaussian_prior_exact_spacing: true
+semantic_gaussian_prior_lightweight_context: false
+semantic_gaussian_prior_mean_offset_limit: 1.0
+semantic_gaussian_prior_log_scale_limit: 1.0
+semantic_gaussian_prior_color_residual_limit: 0.25
+semantic_gaussian_prior_opacity_logit_limit: 2.0
+
+residual_optimization_iters: 20
+p1_enabled: true
+p1_mode: "full"  # Override with ROS param: direct, light, or full.
+p1_light_iters: 5
+p1_full_iters: 20
+evaluation_save_images: true
+
+sh_degree: 3
+white_background: false
+random_background: false
+convert_SHs_python: false
+compute_cov3D_python: false
+lambda_erank: 0
+scaling_scale: 2
+
+position_lr: 0.00016
+feature_lr: 0.0050
+opacity_lr: 0.05
+scaling_lr: 0.015
+rotation_lr: 0.001
+lambda_dssim: 0.2
+optimize_depth: false
+lambda_depth: 0.0
+iteration_decay: false
+dynamic_appearance_weight: true
+dynamic_geometry_capacity: true
+random_seed: 20260725
+
+apply_exposure: true
+exposure_lr: 0.001
+skybox_points_num: 100000
+skybox_radius: 10000

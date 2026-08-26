@@ -3962,17 +3962,21 @@ void decayOptList(int max_iters, const int train_camera_num,
     }
 }
 
-double optimize(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianModel>& pc)
+double optimize(
+    const std::shared_ptr<Dataset>& dataset,
+    std::shared_ptr<GaussianModel>& pc,
+    int iteration_budget)
 {
-    if (pc->residual_optimization_iters_ <= 0)
+    const int max_iters = iteration_budget >= 0
+        ? iteration_budget
+        : pc->residual_optimization_iters_;
+    if (max_iters <= 0)
     {
         return 0.0;
     }
     pc->t_start_ = std::chrono::steady_clock::now();
     int updated_num = 0;
     std::vector<int> opt_list;
-    int max_iters = pc->residual_optimization_iters_;
-
     int train_camera_num = dataset->train_cameras_.size();
     std::vector<int> all_list(train_camera_num);
     std::iota(all_list.begin(), all_list.end(), 0);

@@ -586,6 +586,43 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     double total_adding_time = 0;
     double total_extending_time = 0;
     int keyframe_count = 0;
+    const bool p1_enabled = prm.p1_enabled;
+    const std::string p1_mode = prm.p1_mode;
+    const int p1_light_iters = std::max(0, prm.p1_light_iters);
+    const int p1_full_iters = std::max(0, prm.p1_full_iters);
+    if (p1_enabled && p1_mode != "direct" && p1_mode != "light" &&
+        p1_mode != "full")
+    {
+        throw std::invalid_argument(
+            "p1_mode must be one of: direct, light, full");
+    }
+    std::ofstream p1_telemetry;
+    std::string p1_telemetry_path;
+    std::string p1_telemetry_temp_path;
+    if (p1_enabled)
+    {
+        p1_telemetry_path = result_path + "/p1_telemetry.csv";
+        // Evaluation clears result_path before writing rendered outputs, so the
+        // live telemetry must remain a sibling until evaluation is complete.
+        p1_telemetry_temp_path = result_path + ".p1_telemetry.tmp";
+        p1_telemetry.open(p1_telemetry_temp_path, std::ios::out | std::ios::trunc);
+        if (!p1_telemetry.is_open())
+        {
+            throw std::runtime_error(
+                "Cannot write P1 telemetry: " + p1_telemetry_temp_path);
+        }
+        p1_telemetry
+            << "keyframe_id,frame_id,stamp,p1_mode,iteration_budget,"
+            << "pending_candidates,map_gaussians_before_extend,"
+            << "map_gaussians_after_extend,rgb_weight,depth_weight,"
+            << "geometry_weight,pose_weight,extend_ms,optimize_ms,"
+            << "updated_gaussians\n";
+        std::cout << "[Gaussian-LIC P1] enabled, mode=" << p1_mode
+                  << ", light_iters=" << p1_light_iters
+                  << ", full_iters=" << p1_full_iters
+                  << ", telemetry=" << p1_telemetry_path << std::endl;
+        p1_telemetry.flush();
+    }
     const int checkpoint_every_keyframes = std::max(0, prm.checkpoint_every_keyframes);
     std::string checkpoint_dir = result_path + "/checkpoints";
     if (checkpoint_every_keyframes > 0)
@@ -634,6 +671,11 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         }
         else continue;
 
+        const int64_t pending_candidates =
+            static_cast<int64_t>(dataset->pointcloud_.size());
+        const int64_t map_gaussians_before_extend = gaussians->getXYZ().size(0);
+        int64_t map_gaussians_after_extend = map_gaussians_before_extend;
+        double extend_ms = 0.0;
         if (!gaussians->is_init_)
         {
             /// [3] initialize map
@@ -641,6 +683,7 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
             gaussians_initialized = true;
             gaussians->initialize(dataset);
             gaussians->trainingSetup();
+            map_gaussians_after_extend = gaussians->getXYZ().size(0);
         }
         else 
         {
@@ -650,21 +693,51 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
             torch::cuda::synchronize();
             t_end = std::chrono::steady_clock::now();
             total_extending_time += std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
+            extend_ms = std::chrono::duration_cast<
+                std::chrono::duration<double, std::milli>>(t_end - t_start).count();
+            map_gaussians_after_extend = gaussians->getXYZ().size(0);
         }
 
         // Apply one late semantic observation after geometry is stable for this
         // keyframe. The update writes metadata only; no optimizer state changes.
         processLateSemantic();
 
+        const int iteration_budget = !p1_enabled ? -1
+            : (p1_mode == "direct" ? 0
+                : (p1_mode == "light" ? p1_light_iters : p1_full_iters));
+
         /// [5] optimize map
         t_start = std::chrono::steady_clock::now();
-        double updated_num = optimize(dataset, gaussians);
+        double updated_num = optimize(dataset, gaussians, iteration_budget);
         torch::cuda::synchronize();
         t_end = std::chrono::steady_clock::now();
         total_mapping_time += std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
+        const double optimize_ms = std::chrono::duration_cast<
+            std::chrono::duration<double, std::milli>>(t_end - t_start).count();
         std::cout << std::fixed << std::setprecision(2) 
                   << "\033[1;36m Update " << updated_num / 10000 
                   << "w GS per Iter \033[0m" << std::endl;
+
+        if (p1_enabled)
+        {
+            const auto latest_weight = [](const std::vector<float>& weights)
+            {
+                return weights.empty() ? 1.0f : weights.back();
+            };
+            p1_telemetry
+                << keyframe_count << ',' << dataset->all_frame_num_ - 1 << ','
+                << std::fixed << std::setprecision(9)
+                << cur_frame.point_msg->header.stamp.toSec() << ','
+                << p1_mode << ',' << iteration_budget << ','
+                << pending_candidates << ',' << map_gaussians_before_extend << ','
+                << map_gaussians_after_extend << ','
+                << latest_weight(dataset->frame_rgb_weights_) << ','
+                << latest_weight(dataset->frame_depth_weights_) << ','
+                << latest_weight(dataset->frame_geometry_weights_) << ','
+                << latest_weight(dataset->frame_pose_weights_) << ','
+                << extend_ms << ',' << optimize_ms << ',' << updated_num << '\n';
+            p1_telemetry.flush();
+        }
 
         if (prm.prune_every_keyframes > 0 &&
             prm.prune_opacity_threshold > 0.0 &&
@@ -799,6 +872,23 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     catch (const std::exception& e)
     {
         std::cerr << "[Gaussian-LIC] failed to write semantic bundle info: " << e.what() << std::endl;
+    }
+    if (p1_enabled)
+    {
+        p1_telemetry.close();
+        try
+        {
+            std::filesystem::create_directories(result_path);
+            std::filesystem::remove(p1_telemetry_path);
+            std::filesystem::rename(p1_telemetry_temp_path, p1_telemetry_path);
+            std::cout << "[Gaussian-LIC P1] telemetry saved: "
+                      << p1_telemetry_path << std::endl;
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[Gaussian-LIC P1] failed to finalize telemetry: "
+                      << e.what() << std::endl;
+        }
     }
 
     std::cout << "\n\n😋 Gaussian-LIC Done!\n\n\n";
@@ -1018,6 +1108,22 @@ int main(int argc, char** argv)
         residual_optimization_iters,
         residual_optimization_iters);
     config_node["residual_optimization_iters"] = residual_optimization_iters;
+    bool p1_enabled = config_node["p1_enabled"]
+        ? config_node["p1_enabled"].as<bool>() : false;
+    nh.param<bool>("p1_enabled", p1_enabled, p1_enabled);
+    config_node["p1_enabled"] = p1_enabled;
+    std::string p1_mode = config_node["p1_mode"]
+        ? config_node["p1_mode"].as<std::string>() : "full";
+    nh.param<std::string>("p1_mode", p1_mode, p1_mode);
+    config_node["p1_mode"] = p1_mode;
+    int p1_light_iters = config_node["p1_light_iters"]
+        ? config_node["p1_light_iters"].as<int>() : 5;
+    nh.param<int>("p1_light_iters", p1_light_iters, p1_light_iters);
+    config_node["p1_light_iters"] = p1_light_iters;
+    int p1_full_iters = config_node["p1_full_iters"]
+        ? config_node["p1_full_iters"].as<int>() : residual_optimization_iters;
+    nh.param<int>("p1_full_iters", p1_full_iters, p1_full_iters);
+    config_node["p1_full_iters"] = p1_full_iters;
     bool evaluation_save_images = config_node["evaluation_save_images"]
         ? config_node["evaluation_save_images"].as<bool>() : true;
     nh.param<bool>(
