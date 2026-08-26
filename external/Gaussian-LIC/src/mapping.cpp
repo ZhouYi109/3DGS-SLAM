@@ -29,90 +29,9 @@
 #include <fstream>
 #include <deque>
 #include <cmath>
-#include <unordered_map>
 #include <termios.h>
 #include <unistd.h>
 #include <fcntl.h>
-
-namespace
-{
-struct P1VoxelKey
-{
-    int x;
-    int y;
-    int z;
-
-    bool operator==(const P1VoxelKey& other) const
-    {
-        return x == other.x && y == other.y && z == other.z;
-    }
-};
-
-struct P1VoxelKeyHash
-{
-    std::size_t operator()(const P1VoxelKey& key) const
-    {
-        const std::size_t hx = std::hash<int>{}(key.x);
-        const std::size_t hy = std::hash<int>{}(key.y);
-        const std::size_t hz = std::hash<int>{}(key.z);
-        return hx ^ (hy << 1) ^ (hz << 2);
-    }
-};
-
-int64_t maintainDirectGaussians(
-    const std::shared_ptr<GaussianModel>& gaussians,
-    double voxel_size,
-    double min_opacity)
-{
-    const int64_t total_rows = gaussians->getXYZ().size(0);
-    const int64_t skybox_rows = std::min<int64_t>(gaussians->skybox_points_num_, total_rows);
-    if (total_rows <= skybox_rows || voxel_size <= 0.0) return total_rows;
-
-    torch::NoGradGuard no_grad;
-    auto xyz = gaussians->getXYZ().detach().to(torch::kCPU).to(torch::kFloat32).contiguous();
-    auto opacity = gaussians->getOpacity().detach().to(torch::kCPU).to(torch::kFloat32).contiguous();
-    auto keep = torch::zeros({total_rows}, torch::TensorOptions().device(torch::kCPU).dtype(torch::kBool));
-    auto* xyz_data = xyz.data_ptr<float>();
-    auto* opacity_data = opacity.data_ptr<float>();
-    auto* keep_data = keep.data_ptr<bool>();
-    std::unordered_map<P1VoxelKey, int64_t, P1VoxelKeyHash> voxel_best;
-    voxel_best.reserve(static_cast<std::size_t>(total_rows - skybox_rows));
-
-    for (int64_t index = 0; index < skybox_rows; ++index) keep_data[index] = true;
-    for (int64_t index = skybox_rows; index < total_rows; ++index)
-    {
-        const float confidence = opacity_data[index];
-        if (confidence < min_opacity) continue;
-        const P1VoxelKey key{
-            static_cast<int>(std::floor(xyz_data[3 * index] / voxel_size)),
-            static_cast<int>(std::floor(xyz_data[3 * index + 1] / voxel_size)),
-            static_cast<int>(std::floor(xyz_data[3 * index + 2] / voxel_size)),
-        };
-        const auto found = voxel_best.find(key);
-        if (found == voxel_best.end())
-        {
-            voxel_best.emplace(key, index);
-            keep_data[index] = true;
-            continue;
-        }
-        const int64_t incumbent = found->second;
-        // Prefer higher geometric confidence; on ties retain the older candidate.
-        if (confidence > opacity_data[incumbent])
-        {
-            keep_data[incumbent] = false;
-            keep_data[index] = true;
-            found->second = index;
-        }
-    }
-
-    const int64_t kept_rows = keep.sum().item<int64_t>();
-    if (kept_rows > skybox_rows && kept_rows < total_rows)
-    {
-        gaussians->pruneGaussians(keep);
-    }
-    return kept_rows;
-}
-}  // namespace
 
 std::mutex m_buf;
 std::condition_variable con;
@@ -771,7 +690,14 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         {
             /// [4] extend map
             t_start = std::chrono::steady_clock::now();
-            extend(dataset, gaussians);
+            const bool candidate_dedup_enabled =
+                p1_enabled && p1_mode == "direct_maintained" &&
+                prm.p1_candidate_dedup_enabled;
+            extend(
+                dataset, gaussians, candidate_dedup_enabled,
+                prm.p1_candidate_dedup_pixel_stride,
+                static_cast<float>(prm.p1_candidate_dedup_max_alpha),
+                static_cast<float>(prm.p1_candidate_dedup_depth_tolerance));
             torch::cuda::synchronize();
             t_end = std::chrono::steady_clock::now();
             total_extending_time += std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
@@ -843,26 +769,6 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
                           << kept_rows << ", threshold="
                           << prm.prune_opacity_threshold << std::endl;
             }
-        }
-
-        if (p1_enabled && p1_mode == "direct_maintained" &&
-            prm.p1_direct_maintain_every_keyframes > 0 &&
-            keyframe_count % prm.p1_direct_maintain_every_keyframes == 0)
-        {
-            const int64_t before_rows = gaussians->getXYZ().size(0);
-            const auto maintenance_start = std::chrono::steady_clock::now();
-            const int64_t kept_rows = maintainDirectGaussians(
-                gaussians,
-                prm.p1_direct_maintain_voxel_size,
-                prm.p1_direct_maintain_min_opacity);
-            torch::cuda::synchronize();
-            const double maintenance_ms = std::chrono::duration_cast<
-                std::chrono::duration<double, std::milli>>(
-                std::chrono::steady_clock::now() - maintenance_start).count();
-            std::cout << "[Gaussian-LIC P1] direct maintenance at keyframe "
-                      << keyframe_count << ": " << before_rows << " -> " << kept_rows
-                      << ", voxel=" << prm.p1_direct_maintain_voxel_size
-                      << ", ms=" << maintenance_ms << std::endl;
         }
 
         if (checkpoint_every_keyframes > 0 && keyframe_count > 0 && keyframe_count % checkpoint_every_keyframes == 0)
@@ -1226,27 +1132,34 @@ int main(int argc, char** argv)
         ? config_node["p1_full_iters"].as<int>() : residual_optimization_iters;
     nh.param<int>("p1_full_iters", p1_full_iters, p1_full_iters);
     config_node["p1_full_iters"] = p1_full_iters;
-    int p1_direct_maintain_every_keyframes = config_node["p1_direct_maintain_every_keyframes"]
-        ? config_node["p1_direct_maintain_every_keyframes"].as<int>() : 20;
+    bool p1_candidate_dedup_enabled = config_node["p1_candidate_dedup_enabled"]
+        ? config_node["p1_candidate_dedup_enabled"].as<bool>() : true;
+    nh.param<bool>(
+        "p1_candidate_dedup_enabled",
+        p1_candidate_dedup_enabled,
+        p1_candidate_dedup_enabled);
+    config_node["p1_candidate_dedup_enabled"] = p1_candidate_dedup_enabled;
+    int p1_candidate_dedup_pixel_stride = config_node["p1_candidate_dedup_pixel_stride"]
+        ? config_node["p1_candidate_dedup_pixel_stride"].as<int>() : 4;
     nh.param<int>(
-        "p1_direct_maintain_every_keyframes",
-        p1_direct_maintain_every_keyframes,
-        p1_direct_maintain_every_keyframes);
-    config_node["p1_direct_maintain_every_keyframes"] = p1_direct_maintain_every_keyframes;
-    double p1_direct_maintain_voxel_size = config_node["p1_direct_maintain_voxel_size"]
-        ? config_node["p1_direct_maintain_voxel_size"].as<double>() : 0.10;
+        "p1_candidate_dedup_pixel_stride",
+        p1_candidate_dedup_pixel_stride,
+        p1_candidate_dedup_pixel_stride);
+    config_node["p1_candidate_dedup_pixel_stride"] = p1_candidate_dedup_pixel_stride;
+    double p1_candidate_dedup_max_alpha = config_node["p1_candidate_dedup_max_alpha"]
+        ? config_node["p1_candidate_dedup_max_alpha"].as<double>() : 0.60;
     nh.param<double>(
-        "p1_direct_maintain_voxel_size",
-        p1_direct_maintain_voxel_size,
-        p1_direct_maintain_voxel_size);
-    config_node["p1_direct_maintain_voxel_size"] = p1_direct_maintain_voxel_size;
-    double p1_direct_maintain_min_opacity = config_node["p1_direct_maintain_min_opacity"]
-        ? config_node["p1_direct_maintain_min_opacity"].as<double>() : 0.0;
+        "p1_candidate_dedup_max_alpha",
+        p1_candidate_dedup_max_alpha,
+        p1_candidate_dedup_max_alpha);
+    config_node["p1_candidate_dedup_max_alpha"] = p1_candidate_dedup_max_alpha;
+    double p1_candidate_dedup_depth_tolerance = config_node["p1_candidate_dedup_depth_tolerance"]
+        ? config_node["p1_candidate_dedup_depth_tolerance"].as<double>() : 0.20;
     nh.param<double>(
-        "p1_direct_maintain_min_opacity",
-        p1_direct_maintain_min_opacity,
-        p1_direct_maintain_min_opacity);
-    config_node["p1_direct_maintain_min_opacity"] = p1_direct_maintain_min_opacity;
+        "p1_candidate_dedup_depth_tolerance",
+        p1_candidate_dedup_depth_tolerance,
+        p1_candidate_dedup_depth_tolerance);
+    config_node["p1_candidate_dedup_depth_tolerance"] = p1_candidate_dedup_depth_tolerance;
     bool evaluation_save_images = config_node["evaluation_save_images"]
         ? config_node["evaluation_save_images"].as<bool>() : true;
     nh.param<bool>(

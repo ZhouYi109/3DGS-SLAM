@@ -394,7 +394,15 @@ public:
     int64_t prior_forward_candidates_;
 };
 
-void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianModel>& pc);
+// When enabled, extension admits only locally visible, non-redundant candidates
+// from the current keyframe. Existing map rows are never scanned or pruned here.
+void extend(
+    const std::shared_ptr<Dataset>& dataset,
+    std::shared_ptr<GaussianModel>& pc,
+    bool candidate_dedup_enabled = false,
+    int candidate_dedup_pixel_stride = 4,
+    float candidate_dedup_max_alpha = 0.60f,
+    float candidate_dedup_depth_tolerance = 0.20f);
 double optimize(
     const std::shared_ptr<Dataset>& dataset,
     std::shared_ptr<GaussianModel>& pc,

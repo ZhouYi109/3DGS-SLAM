@@ -36,6 +36,7 @@
 #include <cctype>
 #include <cstdint>
 #include <limits>
+#include <unordered_map>
 #include <torch/script.h>
 #include <memory>
 
@@ -3543,7 +3544,13 @@ void GaussianModel::pruneGaussians(const torch::Tensor& keep_mask)
     assertSemanticAlignment();
 }
 
-void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianModel>& pc)
+void extend(
+    const std::shared_ptr<Dataset>& dataset,
+    std::shared_ptr<GaussianModel>& pc,
+    bool candidate_dedup_enabled,
+    int candidate_dedup_pixel_stride,
+    float candidate_dedup_max_alpha,
+    float candidate_dedup_depth_tolerance)
 {
     torch::NoGradGuard no_grad;
     torch::Tensor bg;
@@ -3552,6 +3559,7 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     std::shared_ptr<Camera> viewpoint_cam = dataset->train_cameras_.back();
     auto render_pkg = render(viewpoint_cam, pc, bg, pc->apply_exposure_, true);
     auto rendered_alpha = 1 - std::get<2>(render_pkg).squeeze(0);
+    auto rendered_depth = std::get<1>(render_pkg).squeeze();
 
     int n = dataset->pointcloud_.size();
     if (n == 0)
@@ -3687,6 +3695,7 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     auto filtered_points = points.index_select(0, keep_indices_tensor);
     auto filtered_colors = colors.index_select(0, keep_indices_tensor);
     auto filtered_depths_in_rsp_frame = depths_in_rsp_frame.index_select(0, keep_indices_tensor);
+    auto filtered_camera_depths = depths.index_select(0, keep_indices_tensor);
     auto filtered_pixels = pixels.index_select(0, keep_indices_tensor);
     auto filtered_semantic_memory_index =
         point_semantic_memory_index.index_select(0, keep_indices_tensor_cpu);
@@ -3750,6 +3759,7 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
     torch::Tensor fused_color = RGB2SH(fused_rgb);
     torch::Tensor filtered_depth_tensor = std::get<2>(filtered_pkg);
     auto valid_mask = std::get<3>(filtered_pkg);
+    filtered_camera_depths = filtered_camera_depths.index({valid_mask});
     auto valid_semantic_mask = valid_mask.to(torch::kCPU);
     filtered_pixels = filtered_pixels.index({
         valid_semantic_mask.to(filtered_pixels.device())});
@@ -3766,6 +3776,80 @@ void extend(const std::shared_ptr<Dataset>& dataset, std::shared_ptr<GaussianMod
         filtered_semantic_risk.index({valid_semantic_mask});
     filtered_semantic_observation_count =
         filtered_semantic_observation_count.index({valid_semantic_mask});
+
+    if (candidate_dedup_enabled && fused_point_cloud.size(0) > 0)
+    {
+        // This gate only examines the current keyframe candidates. A candidate
+        // is rejected when the rendered local map already covers its pixel at
+        // a depth-consistent surface; the remaining candidates compete only
+        // inside a small image-space cell, never against the full 3D map.
+        const int stride = std::max(1, candidate_dedup_pixel_stride);
+        const float alpha_limit = std::max(0.0f, std::min(1.0f, candidate_dedup_max_alpha));
+        const float depth_tolerance = std::max(0.0f, candidate_dedup_depth_tolerance);
+        auto x_coords = filtered_pixels.index({torch::indexing::Slice(), 0}).clamp(0, W - 1);
+        auto y_coords = filtered_pixels.index({torch::indexing::Slice(), 1}).clamp(0, H - 1);
+        auto local_alpha = rendered_alpha.index({y_coords, x_coords});
+        auto local_depth = rendered_depth.index({y_coords, x_coords});
+        auto depth_margin = torch::maximum(
+            torch::full_like(filtered_camera_depths, depth_tolerance),
+            filtered_camera_depths * 0.05f);
+        auto already_explained =
+            (local_alpha >= alpha_limit) &
+            (local_depth > 0) &
+            (filtered_camera_depths >= local_depth - depth_margin);
+        auto visible_candidate = torch::logical_not(already_explained);
+
+        auto pixels_cpu = filtered_pixels.to(torch::kCPU).to(torch::kInt32).contiguous();
+        auto depths_cpu = filtered_camera_depths.to(torch::kCPU).to(torch::kFloat32).contiguous();
+        auto visible_cpu = visible_candidate.to(torch::kCPU).contiguous();
+        const int64_t candidate_count = fused_point_cloud.size(0);
+        auto keep_cpu = torch::zeros(
+            {candidate_count}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU));
+        auto* pixel_data = pixels_cpu.data_ptr<int>();
+        auto* depth_data = depths_cpu.data_ptr<float>();
+        auto* visible_data = visible_cpu.data_ptr<bool>();
+        auto* keep_data = keep_cpu.data_ptr<bool>();
+        std::unordered_map<int, int64_t> nearest_per_cell;
+        nearest_per_cell.reserve(static_cast<std::size_t>(candidate_count));
+        const int cells_per_row = (W + stride - 1) / stride;
+        for (int64_t index = 0; index < candidate_count; ++index)
+        {
+            if (!visible_data[index]) continue;
+            const int x = pixel_data[2 * index];
+            const int y = pixel_data[2 * index + 1];
+            const int cell = (y / stride) * cells_per_row + x / stride;
+            const auto found = nearest_per_cell.find(cell);
+            if (found == nearest_per_cell.end())
+            {
+                nearest_per_cell.emplace(cell, index);
+                keep_data[index] = true;
+            }
+            else if (depth_data[index] < depth_data[found->second])
+            {
+                keep_data[found->second] = false;
+                keep_data[index] = true;
+                found->second = index;
+            }
+        }
+        const int64_t kept_candidates = keep_cpu.sum().item<int64_t>();
+        auto keep_mask = keep_cpu.to(fused_point_cloud.device());
+        fused_point_cloud = fused_point_cloud.index({keep_mask, torch::indexing::Slice()});
+        fused_rgb = fused_rgb.index({keep_mask, torch::indexing::Slice()});
+        fused_color = fused_color.index({keep_mask, torch::indexing::Slice()});
+        filtered_depth_tensor = filtered_depth_tensor.index({keep_mask});
+        filtered_pixels = filtered_pixels.index({keep_mask});
+        auto keep_mask_cpu = keep_mask.to(torch::kCPU);
+        filtered_semantic_memory_index = filtered_semantic_memory_index.index({keep_mask_cpu});
+        filtered_semantic_confidence = filtered_semantic_confidence.index({keep_mask_cpu});
+        filtered_semantic_risk = filtered_semantic_risk.index({keep_mask_cpu});
+        filtered_semantic_observation_count = filtered_semantic_observation_count.index({keep_mask_cpu});
+        if (filtered_prior_frame_context.defined())
+        {
+            filtered_prior_frame_context = filtered_prior_frame_context.index({keep_mask});
+        }
+        std::cout << " [candidate gate " << candidate_count << "->"
+                  << kept_candidates << "]";
+    }
     if (fused_point_cloud.size(0) > 0 && keep_ratio < 0.999f)
     {
         const int64_t candidate_count = fused_point_cloud.size(0);
