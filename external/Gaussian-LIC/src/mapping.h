@@ -114,6 +114,9 @@ public:
         p1_mode = node["p1_mode"] ? node["p1_mode"].as<std::string>() : "full";
         p1_light_iters = node["p1_light_iters"] ? node["p1_light_iters"].as<int>() : 5;
         p1_full_iters = node["p1_full_iters"] ? node["p1_full_iters"].as<int>() : residual_optimization_iters;
+        p1_direct_maintain_every_keyframes = node["p1_direct_maintain_every_keyframes"] ? node["p1_direct_maintain_every_keyframes"].as<int>() : 20;
+        p1_direct_maintain_voxel_size = node["p1_direct_maintain_voxel_size"] ? node["p1_direct_maintain_voxel_size"].as<double>() : 0.10;
+        p1_direct_maintain_min_opacity = node["p1_direct_maintain_min_opacity"] ? node["p1_direct_maintain_min_opacity"].as<double>() : 0.0;
         evaluation_save_images = node["evaluation_save_images"] ? node["evaluation_save_images"].as<bool>() : true;
         teacher_distillation_export_enabled = node["teacher_distillation_export_enabled"] ? node["teacher_distillation_export_enabled"].as<bool>() : false;
         teacher_rollout_steps = node["teacher_rollout_steps"] ? node["teacher_rollout_steps"].as<int>() : 0;
@@ -207,6 +210,9 @@ public:
     std::string p1_mode;
     int p1_light_iters;
     int p1_full_iters;
+    int p1_direct_maintain_every_keyframes;
+    double p1_direct_maintain_voxel_size;
+    double p1_direct_maintain_min_opacity;
     bool evaluation_save_images;
     bool teacher_distillation_export_enabled;
     int teacher_rollout_steps;

@@ -25,6 +25,9 @@ case "${p1_mode}" in
     direct)
         iteration_budget=0
         ;;
+    direct_maintained)
+        iteration_budget=0
+        ;;
     light)
         iteration_budget=5
         ;;
@@ -32,7 +35,7 @@ case "${p1_mode}" in
         iteration_budget=20
         ;;
     *)
-        echo "Unsupported P1 mode: ${p1_mode}; use direct, light, or full." >&2
+        echo "Unsupported P1 mode: ${p1_mode}; use direct, direct_maintained, light, or full." >&2
         exit 2
         ;;
 esac
