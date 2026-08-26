@@ -81,10 +81,29 @@ def parse_run(log_root: Path, result_root: Path, run_id: str, input_frames: int)
         and wall.get("gaussian_status") == "0"
         and wall.get("done_seen") == "true"
     ).lower()
+    try:
+        bag_wall_s = float(wall["bag_end"]) - float(wall["bag_start"])
+        finalize_s = float(wall["gaussian_end"]) - float(wall["bag_end"])
+        run_wall_s = float(wall["gaussian_end"]) - float(wall["launch_start"])
+        row["bag_wall_s"] = f"{bag_wall_s:.3f}"
+        row["input_fps_effective"] = f"{input_frames / bag_wall_s:.3f}"
+        row["post_bag_finalize_s"] = f"{finalize_s:.3f}"
+        row["run_wall_s"] = f"{run_wall_s:.3f}"
+    except (KeyError, ValueError):
+        row.update(
+            bag_wall_s="",
+            input_fps_effective="",
+            post_bag_finalize_s="",
+            run_wall_s="",
+        )
     if row["mapping_s"]:
         mapping_s = float(row["mapping_s"])
-        row["mapping_ms_per_input_frame"] = f"{1000.0 * mapping_s / input_frames:.3f}"
-        row["mapping_fps_equivalent"] = f"{input_frames / mapping_s:.3f}"
+        if mapping_s > 0.0:
+            row["mapping_ms_per_input_frame"] = f"{1000.0 * mapping_s / input_frames:.3f}"
+            row["mapping_fps_equivalent"] = f"{input_frames / mapping_s:.3f}"
+        else:
+            row["mapping_ms_per_input_frame"] = "0.000"
+            row["mapping_fps_equivalent"] = ""
     else:
         row["mapping_ms_per_input_frame"] = ""
         row["mapping_fps_equivalent"] = ""
@@ -103,7 +122,8 @@ def main() -> None:
     rows = [parse_run(args.log_root, args.result_root, run, args.input_frames) for run in args.runs]
     columns = [
         "run_id", "completed", "keyframes", "budget_min", "budget_max", "mapping_s",
-        "mapping_ms_per_input_frame", "mapping_fps_equivalent", "adding_s", "extending_s",
+        "mapping_ms_per_input_frame", "mapping_fps_equivalent", "bag_wall_s",
+        "input_fps_effective", "post_bag_finalize_s", "run_wall_s", "adding_s", "extending_s",
         "forward_s", "backward_s", "step_s", "cpu_to_gpu_s", "optimize_mean_ms",
         "optimize_p95_ms", "optimize_sum_s", "extend_mean_ms", "gaussians", "train_psnr",
         "train_ssim", "train_lpips", "novel_psnr", "novel_ssim", "novel_lpips",
