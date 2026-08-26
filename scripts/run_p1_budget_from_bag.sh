@@ -37,7 +37,15 @@ case "${p1_mode}" in
         ;;
 esac
 
-mkdir -p "${result_dir}" "${log_dir}"
+if ! mkdir -p "${result_dir}" "${log_dir}"; then
+    echo "Cannot create result or log directory; check capacity and inode availability." >&2
+    exit 3
+fi
+if ! touch "${result_dir}/.p1_write_probe"; then
+    echo "Result directory is not writable; aborting before ROS startup." >&2
+    exit 3
+fi
+rm -f "${result_dir}/.p1_write_probe"
 if find "${result_dir}" -mindepth 1 -print -quit | grep -q .; then
     echo "Result directory is not empty: ${result_dir}" >&2
     exit 2
