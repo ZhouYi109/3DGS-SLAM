@@ -672,11 +672,11 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     const std::string p1_mode = prm.p1_mode;
     const int p1_light_iters = std::max(0, prm.p1_light_iters);
     const int p1_full_iters = std::max(0, prm.p1_full_iters);
-    if (p1_enabled && p1_mode != "direct" && p1_mode != "light" &&
-        p1_mode != "full")
+    if (p1_enabled && p1_mode != "direct" && p1_mode != "direct_maintained" &&
+        p1_mode != "light" && p1_mode != "full")
     {
         throw std::invalid_argument(
-            "p1_mode must be one of: direct, light, full");
+            "p1_mode must be one of: direct, direct_maintained, light, full");
     }
     std::ofstream p1_telemetry;
     std::string p1_telemetry_path;
