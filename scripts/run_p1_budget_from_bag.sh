@@ -15,7 +15,9 @@ random_seed="${4:-20260725}"
 evaluation_save_images="${EVALUATION_SAVE_IMAGES:-true}"
 gaussian_root="/root/autodl-tmp/catkin_gaussian/src/Gaussian-LIC"
 config_path="${gaussian_root}/config/r3live_p1.yaml"
-result_root="/autodl-fs/data/experiments/p1_budget_20260826"
+# The persistent mount can temporarily reject new directory entries despite
+# reporting free capacity, so allow an experiment-local fallback root.
+result_root="${P1_RESULT_ROOT:-/autodl-fs/data/experiments/p1_budget_20260826}"
 result_dir="${result_root}/${run_id}"
 log_dir="/root/autodl-tmp/runtime_logs/p1_budget_20260826/${run_id}"
 
