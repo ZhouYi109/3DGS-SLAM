@@ -16,7 +16,6 @@ find_package(catkin REQUIRED COMPONENTS
   roslib
   std_msgs
   std_srvs
-  message_generation
   cv_bridge
   image_transport
   pcl_conversions
@@ -53,18 +52,8 @@ pkg_check_modules(YAML_CPP REQUIRED yaml-cpp>=0.5)
 
 find_package(Python3 COMPONENTS Interpreter Development NumPy REQUIRED)
 
-add_service_files(
-  FILES
-  SemanticQuery.srv
-)
-
-generate_messages(
-  DEPENDENCIES
-  std_msgs
-)
-
 catkin_package(
-  CATKIN_DEPENDS roscpp rospy roslib std_msgs std_srvs message_runtime cv_bridge image_transport pcl_conversions pcl_ros nav_msgs sensor_msgs geometry_msgs tf tf_conversions eigen_conversions
+  CATKIN_DEPENDS roscpp rospy roslib std_msgs std_srvs cv_bridge image_transport pcl_conversions pcl_ros nav_msgs sensor_msgs geometry_msgs tf tf_conversions eigen_conversions
 )
 
 include_directories(
@@ -97,18 +86,6 @@ set_target_properties(gs_mapping PROPERTIES
   CUDA_STANDARD 14
   CUDA_STANDARD_REQUIRED ON)
 
-add_executable(semantic_query_cli
-              ${PROJECT_SOURCE_DIR}/src/semantic_bundle.cpp
-              ${PROJECT_SOURCE_DIR}/src/semantic_query_cli.cpp)
-
-add_executable(semantic_highlight_cli
-              ${PROJECT_SOURCE_DIR}/src/semantic_bundle.cpp
-              ${PROJECT_SOURCE_DIR}/src/semantic_highlight_cli.cpp)
-
-add_executable(semantic_query_server
-              ${PROJECT_SOURCE_DIR}/src/semantic_bundle.cpp
-              ${PROJECT_SOURCE_DIR}/src/semantic_query_server.cpp)
-
 if(USE_TENSORRT_DEPTH_COMPLETION)
   target_sources(gs_mapping PRIVATE ${PROJECT_SOURCE_DIR}/src/depth_completer.cpp)
   target_compile_definitions(gs_mapping PRIVATE USE_TENSORRT_DEPTH_COMPLETION=1)
@@ -124,36 +101,6 @@ target_link_libraries(gs_mapping
                       ${Python3_LIBRARIES}
                       ${FFI_LIB}
                       ${CUDA_CUDART_LIBRARY})
-
-target_link_libraries(semantic_query_cli
-                      ${TORCH_LIBRARIES}
-                      ${YAML_CPP_LIBRARIES})
-
-target_link_libraries(semantic_highlight_cli
-                      ${TORCH_LIBRARIES}
-                      ${YAML_CPP_LIBRARIES})
-
-target_link_libraries(semantic_query_server
-                      ${catkin_LIBRARIES}
-                      ${TORCH_LIBRARIES}
-                      ${YAML_CPP_LIBRARIES})
-
-add_dependencies(semantic_query_server ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-
-catkin_install_python(PROGRAMS
-  scripts/object_semantic_memory.py
-  scripts/object_latent_encoder.py
-  scripts/object_semantic_memory_node.py
-  scripts/train_semantic_gaussian_prior.py
-  scripts/export_semantic_gaussian_prior.py
-  scripts/build_prior_manifest.py
-  scripts/prepare_nuscenes_prior_shards.py
-  scripts/build_r3live_teacher_shards.py
-  scripts/prepare_r3live_cross_sequence_split.py
-  scripts/publish_object_memory_real_smoke.py
-  scripts/test_real_object_models.py
-  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-)
 
 if(USE_TENSORRT_DEPTH_COMPLETION)
   target_link_libraries(gs_mapping

@@ -1420,6 +1420,8 @@ GaussianModel::GaussianModel(const Params& prm)
     random_seed_ = prm.random_seed;
     residual_optimization_iters_ =
         std::max(0, prm.residual_optimization_iters);
+    reliable_densification_ema_ = static_cast<float>(
+        std::clamp(prm.reliable_densification_ema, 0.0, 1.0));
     evaluation_save_images_ = prm.evaluation_save_images;
     teacher_distillation_export_enabled_ =
         prm.teacher_distillation_export_enabled;
@@ -3235,6 +3237,80 @@ void GaussianModel::trainingSetup()
         this->exposure_optimizer_.reset(new torch::optim::Adam(Tensor_vec_exposure_, {}));
         exposure_optimizer_->param_groups()[0].options().set_lr(exposure_lr_);
     }
+    const auto evidence_options = torch::TensorOptions().dtype(torch::kFloat32).device(xyz_.device());
+    const int64_t rows = xyz_.size(0);
+    densify_last_gradient_ = torch::zeros({rows}, evidence_options);
+    densify_residual_ema_ = torch::zeros({rows}, evidence_options);
+    densify_residual_mean_ = torch::zeros({rows}, evidence_options);
+    densify_residual_m2_ = torch::zeros({rows}, evidence_options);
+    densify_visible_count_ = torch::zeros({rows}, evidence_options);
+}
+
+void GaussianModel::observeDensificationEvidence(
+    const torch::Tensor& visible,
+    const torch::Tensor& screenspace_points)
+{
+    if (!screenspace_points.grad().defined() || visible.numel() == 0) return;
+    auto visible_mask = visible.to(xyz_.device()).to(torch::kBool);
+    auto indices = torch::nonzero(visible_mask).squeeze(1);
+    if (indices.numel() == 0) return;
+    auto gradients = screenspace_points.grad().detach().index({indices, torch::indexing::Slice(0, 2)});
+    auto residual = gradients.norm(2, 1).clamp(0.0f, 1.0f);
+    auto old_count = densify_visible_count_.index({indices});
+    auto next_count = old_count + 1.0f;
+    auto old_mean = densify_residual_mean_.index({indices});
+    auto delta = residual - old_mean;
+    auto next_mean = old_mean + delta / next_count;
+    auto next_m2 = densify_residual_m2_.index({indices}) + delta * (residual - next_mean);
+    densify_last_gradient_.index_put_({indices}, residual);
+    densify_residual_ema_.index_put_(
+        {indices}, (1.0f - reliable_densification_ema_) *
+            densify_residual_ema_.index({indices}) + reliable_densification_ema_ * residual);
+    densify_residual_mean_.index_put_({indices}, next_mean);
+    densify_residual_m2_.index_put_({indices}, next_m2);
+    densify_visible_count_.index_put_({indices}, next_count);
+}
+
+int64_t GaussianModel::densifyReliableTopK(
+    const std::string& mode, int top_k, int min_views, int n0,
+    float variance_tau, float scale_shrink)
+{
+    torch::NoGradGuard no_grad;
+    if (top_k <= 0 || xyz_.size(0) <= skybox_points_num_) return 0;
+    auto score = mode == "gradient" ? densify_last_gradient_.clone() : densify_residual_ema_.clone();
+    if (mode == "residual_count" || mode == "full")
+    {
+        score *= (densify_visible_count_ / static_cast<float>(std::max(1, n0))).clamp(0.0f, 1.0f);
+    }
+    if (mode == "full")
+    {
+        auto variance = densify_residual_m2_ / (densify_visible_count_ - 1.0f).clamp_min(1.0f);
+        score *= torch::exp(-variance / std::max(1e-6f, variance_tau * variance_tau));
+    }
+    score.index({torch::indexing::Slice(0, skybox_points_num_)}).fill_(-1.0f);
+    score.masked_fill_(densify_visible_count_ < static_cast<float>(std::max(1, min_views)), -1.0f);
+    const int64_t count = std::min<int64_t>(top_k, score.size(0));
+    auto selected = std::get<1>(torch::topk(score, count));
+    selected = selected.index({score.index({selected}) > 0.0f});
+    if (selected.numel() == 0) return 0;
+    auto new_xyz = xyz_.index({selected}).detach().clone();
+    auto new_features_dc = features_dc_.index({selected}).detach().clone();
+    auto new_features_rest = features_rest_.index({selected}).detach().clone();
+    auto new_opacity = opacity_.index({selected}).detach().clone();
+    auto new_scaling = scaling_.index({selected}).detach().clone() - std::log(std::max(1.01f, scale_shrink));
+    auto new_rotation = rotation_.index({selected}).detach().clone();
+    auto ids = torch::full({selected.size(0)}, -1, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
+    torch::Tensor empty;
+    const int64_t old_rows = xyz_.size(0);
+    densificationPostfix(new_xyz, new_features_dc, new_features_rest, new_opacity,
+                         new_scaling, new_rotation, empty, empty, empty, empty, empty, ids);
+    auto child_rows = torch::indexing::Slice(old_rows, xyz_.size(0));
+    densify_last_gradient_.index_put_({child_rows}, densify_last_gradient_.index({selected}));
+    densify_residual_ema_.index_put_({child_rows}, densify_residual_ema_.index({selected}));
+    densify_residual_mean_.index_put_({child_rows}, densify_residual_mean_.index({selected}));
+    densify_residual_m2_.index_put_({child_rows}, densify_residual_m2_.index({selected}));
+    densify_visible_count_.index_put_({child_rows}, densify_visible_count_.index({selected}));
+    return xyz_.size(0) - old_rows;
 }
 
 void GaussianModel::assertSemanticAlignment() const
@@ -3378,6 +3454,17 @@ void GaussianModel::densificationPostfix(
             new_candidate_ids.detach().to(torch::kCPU).to(torch::kInt32),
         },
         0).contiguous();
+    const auto evidence_options = torch::TensorOptions().dtype(torch::kFloat32).device(xyz_.device());
+    densify_last_gradient_ = torch::cat(
+        {densify_last_gradient_, torch::zeros({new_gaussian_rows}, evidence_options)}, 0);
+    densify_residual_ema_ = torch::cat(
+        {densify_residual_ema_, torch::zeros({new_gaussian_rows}, evidence_options)}, 0);
+    densify_residual_mean_ = torch::cat(
+        {densify_residual_mean_, torch::zeros({new_gaussian_rows}, evidence_options)}, 0);
+    densify_residual_m2_ = torch::cat(
+        {densify_residual_m2_, torch::zeros({new_gaussian_rows}, evidence_options)}, 0);
+    densify_visible_count_ = torch::cat(
+        {densify_visible_count_, torch::zeros({new_gaussian_rows}, evidence_options)}, 0);
 
     GAUSSIAN_MODEL_TENSORS_TO_VEC
 
@@ -3516,6 +3603,11 @@ void GaussianModel::pruneGaussians(const torch::Tensor& keep_mask)
     this->rotation_ = optimizable_tensors[5];
     gaussian_candidate_id_ =
         gaussian_candidate_id_.index({keep_cpu}).contiguous();
+    densify_last_gradient_ = densify_last_gradient_.index({keep_cuda}).contiguous();
+    densify_residual_ema_ = densify_residual_ema_.index({keep_cuda}).contiguous();
+    densify_residual_mean_ = densify_residual_mean_.index({keep_cuda}).contiguous();
+    densify_residual_m2_ = densify_residual_m2_.index({keep_cuda}).contiguous();
+    densify_visible_count_ = densify_visible_count_.index({keep_cuda}).contiguous();
     GAUSSIAN_MODEL_TENSORS_TO_VEC
 
     if (online_semantic_initialized_)
@@ -4134,6 +4226,7 @@ double optimize(
         pc->t_start_ = std::chrono::steady_clock::now();
         auto visible = std::get<4>(render_pkg);
         updated_num += visible.sum().item<int>();
+        pc->observeDensificationEvidence(visible, std::get<3>(render_pkg));
         pc->accumulateTeacherRolloutGradients(visible);
         pc->sparse_optimizer_->set_visibility_and_N(visible, pc->getXYZ().size(0));
         pc->sparse_optimizer_->step();

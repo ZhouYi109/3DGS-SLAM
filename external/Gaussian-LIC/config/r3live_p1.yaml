@@ -49,6 +49,17 @@ p1_candidate_dedup_enabled: true
 p1_candidate_dedup_pixel_stride: 4
 p1_candidate_dedup_max_alpha: 0.60
 p1_candidate_dedup_depth_tolerance: 0.20
+
+# Observation-reliable densification. Keep disabled for all existing baselines.
+reliable_densification_enabled: false
+reliable_densification_mode: "full"  # gradient, residual, residual_count, full
+reliable_densification_every_keyframes: 20
+reliable_densification_top_k: 256
+reliable_densification_min_views: 3
+reliable_densification_n0: 5
+reliable_densification_ema: 0.20
+reliable_densification_variance_tau: 0.05
+reliable_densification_scale_shrink: 1.6
 evaluation_save_images: true
 
 sh_degree: 3

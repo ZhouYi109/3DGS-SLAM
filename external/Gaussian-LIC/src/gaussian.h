@@ -221,6 +221,9 @@ public:
     void saveTeacherDistillationSidecar(const std::string& result_path);
 
     void trainingSetup();
+    void observeDensificationEvidence(const torch::Tensor& visible, const torch::Tensor& screenspace_points);
+    int64_t densifyReliableTopK(const std::string& mode, int top_k, int min_views,
+                                int n0, float variance_tau, float scale_shrink);
 
     void densificationPostfix(
         torch::Tensor& new_xyz,
@@ -295,6 +298,7 @@ public:
     bool dynamic_geometry_capacity_;
     int random_seed_;
     int residual_optimization_iters_;
+    float reliable_densification_ema_;
     bool evaluation_save_images_;
     std::mt19937 random_generator_;
 
@@ -381,6 +385,11 @@ public:
     torch::Tensor teacher_rollout_capture_ids_;
 
     torch::Tensor bg_;
+    torch::Tensor densify_last_gradient_;
+    torch::Tensor densify_residual_ema_;
+    torch::Tensor densify_residual_mean_;
+    torch::Tensor densify_residual_m2_;
+    torch::Tensor densify_visible_count_;
 
     std::chrono::steady_clock::time_point t_start_;
     std::chrono::steady_clock::time_point t_end_;

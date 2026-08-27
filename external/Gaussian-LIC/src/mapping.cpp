@@ -722,6 +722,21 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         total_mapping_time += std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
         const double optimize_ms = std::chrono::duration_cast<
             std::chrono::duration<double, std::milli>>(t_end - t_start).count();
+        if (prm.reliable_densification_enabled &&
+            prm.reliable_densification_every_keyframes > 0 &&
+            keyframe_count % prm.reliable_densification_every_keyframes == 0)
+        {
+            const int64_t added = gaussians->densifyReliableTopK(
+                prm.reliable_densification_mode,
+                prm.reliable_densification_top_k,
+                prm.reliable_densification_min_views,
+                prm.reliable_densification_n0,
+                static_cast<float>(prm.reliable_densification_variance_tau),
+                static_cast<float>(prm.reliable_densification_scale_shrink));
+            std::cout << "[Reliable Densification] mode="
+                      << prm.reliable_densification_mode << ", added=" << added
+                      << std::endl;
+        }
         std::cout << std::fixed << std::setprecision(2) 
                   << "\033[1;36m Update " << updated_num / 10000 
                   << "w GS per Iter \033[0m" << std::endl;
