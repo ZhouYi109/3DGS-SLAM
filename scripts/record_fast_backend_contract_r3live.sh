@@ -5,7 +5,7 @@ set +e
 source /opt/ros/noetic/setup.bash
 source /root/autodl-tmp/FastLIVO2_ws/devel_isolated/setup.bash
 
-run_id="${1:-frozen_fast_backend_contract_001}"
+run_id="${1:-frozen_fast_backend_contract_planes_003}"
 output_bag="${2:-/autodl-fs/data/remote_code_frozen/${run_id}.bag}"
 playback_rate="${3:-0.8}"
 source_bag="/root/autodl-tmp/datasets/r3live/hku_campus_seq_00.bag"
@@ -72,7 +72,7 @@ if [ "${frontend_ready}" != "true" ]; then
 fi
 
 stdbuf -oL -eL rosbag record --lz4 --buffsize=1024 -O "${record_bag}" \
-    /image_for_gs /depth_for_gs /pose_for_gs /points_for_gs /weights_for_gs \
+    /image_for_gs /depth_for_gs /pose_for_gs /points_for_gs /planes_for_gs /weights_for_gs \
     >"${log_dir}/record.log" 2>&1 &
 recorder_pid=$!
 sleep 3
@@ -123,6 +123,7 @@ expected_topics = {
     "/depth_for_gs",
     "/pose_for_gs",
     "/points_for_gs",
+    "/planes_for_gs",
     "/weights_for_gs",
 }
 counts = {entry["topic"]: int(entry["messages"]) for entry in info["topics"]}
@@ -131,7 +132,7 @@ wrong = {topic: counts.get(topic) for topic in expected_topics if counts.get(top
 if missing or wrong:
     print(f"Frozen bag validation failed: missing={sorted(missing)}, wrong={wrong}", file=sys.stderr)
     raise SystemExit(1)
-print("Frozen bag validation passed: all five topics contain 3024 messages.")
+print("Frozen bag validation passed: all six topics contain 3024 messages.")
 PY
 validation_status=$?
 

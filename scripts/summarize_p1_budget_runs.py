@@ -65,6 +65,8 @@ def parse_run(log_root: Path, result_root: Path, run_id: str, input_frames: int)
     optimize_ms = [float(item["optimize_ms"]) for item in samples]
     extend_ms = [float(item["extend_ms"]) for item in samples]
     budgets = [int(item["iteration_budget"]) for item in samples]
+    plane_samples = [int(item.get("frontend_plane_samples", "0")) for item in samples]
+    plane_ratios = [float(item.get("frontend_plane_valid_ratio", "0")) for item in samples]
     row.update(
         keyframes=str(len(samples)),
         budget_min=str(min(budgets)) if budgets else "",
@@ -73,6 +75,12 @@ def parse_run(log_root: Path, result_root: Path, run_id: str, input_frames: int)
         optimize_p95_ms=f"{percentile(optimize_ms, 0.95):.3f}" if optimize_ms else "",
         optimize_sum_s=f"{sum(optimize_ms) / 1000.0:.3f}" if optimize_ms else "",
         extend_mean_ms=f"{sum(extend_ms) / len(extend_ms):.3f}" if extend_ms else "",
+        frontend_plane_samples_mean=(
+            f"{sum(plane_samples) / len(plane_samples):.3f}" if plane_samples else ""
+        ),
+        frontend_plane_valid_ratio_mean=(
+            f"{sum(plane_ratios) / len(plane_ratios):.6f}" if plane_ratios else ""
+        ),
     )
 
     wall = parse_wall_times(log_root / run_id / "wall_times.txt")
@@ -85,6 +93,10 @@ def parse_run(log_root: Path, result_root: Path, run_id: str, input_frames: int)
         "geometry_lambda_point_plane",
         "geometry_depth_discontinuity_ratio",
         "geometry_point_plane_eps",
+        "frontend_plane_supervision",
+        "frontend_plane_splat_radius",
+        "frontend_plane_min_confidence",
+        "frontend_plane_fallback_to_depth",
     ):
         row[key] = wall.get(key, "")
     row["completed"] = str(
@@ -137,11 +149,14 @@ def main() -> None:
         "input_fps_effective", "post_bag_finalize_s", "run_wall_s", "adding_s", "extending_s",
         "forward_s", "backward_s", "step_s", "cpu_to_gpu_s", "optimize_mean_ms",
         "optimize_p95_ms", "optimize_sum_s", "extend_mean_ms", "gaussians", "train_psnr",
+        "frontend_plane_samples_mean", "frontend_plane_valid_ratio_mean",
         "train_ssim", "train_lpips", "novel_psnr", "novel_ssim", "novel_lpips",
         "geometry_optimize_depth", "geometry_lambda_depth",
         "geometry_optimize_normal", "geometry_lambda_normal",
         "geometry_optimize_point_plane", "geometry_lambda_point_plane",
         "geometry_depth_discontinuity_ratio", "geometry_point_plane_eps",
+        "frontend_plane_supervision", "frontend_plane_splat_radius",
+        "frontend_plane_min_confidence", "frontend_plane_fallback_to_depth",
     ]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8", newline="") as handle:

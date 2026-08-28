@@ -120,6 +120,11 @@ public:
     int image_height_;
     torch::Tensor original_image_;
     torch::Tensor original_depth_;
+    torch::Tensor frontend_plane_normal_;
+    torch::Tensor frontend_plane_center_;
+    torch::Tensor frontend_plane_confidence_;
+    int frontend_plane_sample_count_ = 0;
+    int frontend_plane_valid_pixels_ = 0;
           
     float fx_;
     float fy_;

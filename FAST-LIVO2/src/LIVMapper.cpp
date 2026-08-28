@@ -14,6 +14,7 @@ which is included as part of this source code package.
 #include <algorithm>
 #include <cmath>
 #include <sensor_msgs/image_encodings.h>
+#include <sensor_msgs/point_cloud2_iterator.h>
 
 LIVMapper::LIVMapper(ros::NodeHandle &nh)
     : extT(0, 0, 0),
@@ -116,9 +117,13 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("publish/pub_effect_point_en", pub_effect_point_en, false);
   nh.param<bool>("publish/dense_map_en", dense_map_en, false);
   nh.param<bool>("publish/gs_output_en", gs_output_en, true);
+  nh.param<bool>("publish/gs_plane_output_en", gs_plane_output_en_, true);
   nh.param<int>("publish/gs_depth_history", gs_depth_history, 5);
   nh.param<int>("publish/gs_point_skip", gs_point_skip, 10);
   nh.param<int>("publish/gs_publish_delay_frames", gs_publish_delay_frames, 2);
+  nh.param<int>("publish/gs_plane_point_skip", gs_plane_point_skip_, 1);
+  nh.param<int>("publish/gs_plane_max_samples", gs_plane_max_samples_, 5000);
+  nh.param<double>("publish/gs_plane_min_confidence", gs_plane_min_confidence_, 0.2);
   nh.param<double>("publish/gs_max_depth", gs_max_depth, 20.0);
   nh.param<bool>("publish/gs_rectify_image", gs_rectify_image_, false);
   nh.param<int>("publish/gs_image_width", gs_image_width_, 0);
@@ -202,6 +207,11 @@ void LIVMapper::initialize_3dgs_adapter()
   {
     throw std::runtime_error("Invalid Gaussian-LIC output camera contract.");
   }
+  if (gs_plane_point_skip_ <= 0 || gs_plane_max_samples_ < 0 ||
+      gs_plane_min_confidence_ < 0.0 || gs_plane_min_confidence_ > 1.0)
+  {
+    throw std::runtime_error("Invalid /planes_for_gs sampling configuration.");
+  }
 
   if (gs_rectify_image_)
   {
@@ -230,7 +240,9 @@ void LIVMapper::initialize_3dgs_adapter()
   ROS_INFO_STREAM("[3DGS Contract] image=" << gs_image_width_ << "x" << gs_image_height_
                   << " encoding=bgr8 depth=32FC1(m) pose=T_wc"
                   << " K=[" << gs_fx_ << "," << gs_fy_ << "," << gs_cx_ << "," << gs_cy_ << "]"
-                  << " rectify=" << (gs_rectify_image_ ? "true" : "false"));
+                  << " rectify=" << (gs_rectify_image_ ? "true" : "false")
+                  << " planes=" << (gs_plane_output_en_ ? "true" : "false")
+                  << " plane_min_confidence=" << gs_plane_min_confidence_);
 }
 
 void LIVMapper::initializeFiles() 
@@ -263,7 +275,7 @@ void LIVMapper::initializeFiles()
     fout_gs_weights_runtime.open(std::string(ROOT_DIR) + "Log/weights_for_gs_runtime.csv", std::ios::out);
     if (fout_gs_weights_runtime.is_open())
     {
-      fout_gs_weights_runtime << "time,visual_score,lidar_score,fused_score,imu_score,semantic_risk_visual,semantic_risk_lidar,rgb_loss_weight,depth_loss_weight,geometry_loss_weight,pose_prior_weight,point_count\n";
+      fout_gs_weights_runtime << "time,visual_score,lidar_score,fused_score,imu_score,semantic_risk_visual,semantic_risk_lidar,rgb_loss_weight,depth_loss_weight,geometry_loss_weight,pose_prior_weight,point_count,plane_count\n";
     }
   }
   fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"), std::ios::out);
@@ -371,6 +383,7 @@ void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_tr
   pubGSDepth = it.advertise("/depth_for_gs", 10);
   pubGSPose = nh.advertise<geometry_msgs::PoseStamped>("/pose_for_gs", 100);
   pubGSPoints = nh.advertise<sensor_msgs::PointCloud2>("/points_for_gs", 100);
+  pubGSPlanes = nh.advertise<sensor_msgs::PointCloud2>("/planes_for_gs", 100);
   pubGSWeights = nh.advertise<geometry_msgs::QuaternionStamped>("/weights_for_gs", 100);
   std::string semantic_risk_visual_topic;
   std::string semantic_risk_lidar_topic;
@@ -1528,6 +1541,100 @@ PointCloudXYZRGB::Ptr LIVMapper::build_3dgs_cloud(const Eigen::Quaterniond &q_wc
   return cloud;
 }
 
+std::vector<LIVMapper::GSPlaneSample> LIVMapper::build_3dgs_plane_submap(
+    const Eigen::Quaterniond &q_wc, const Eigen::Vector3d &t_wc) const
+{
+  std::vector<GSPlaneSample> planes;
+  if (!gs_plane_output_en_ || !gs_adapter_ready_ || voxelmap_manager == nullptr) return planes;
+
+  const M3D R_cw = q_wc.toRotationMatrix().transpose();
+  const V3D t_cw = -R_cw * t_wc;
+  const size_t stride = static_cast<size_t>(std::max(1, gs_plane_point_skip_));
+  const size_t max_samples = static_cast<size_t>(std::max(0, gs_plane_max_samples_));
+  planes.reserve(std::min(max_samples, voxelmap_manager->ptpl_list_.size() / stride + 1));
+
+  for (size_t i = 0; i < voxelmap_manager->ptpl_list_.size(); i += stride)
+  {
+    const PointToPlane &match = voxelmap_manager->ptpl_list_[i];
+    const V3D point_c = R_cw * match.point_w_ + t_cw;
+    if (point_c.z() <= 0.0 || point_c.z() > gs_max_depth) continue;
+    const int u = static_cast<int>(std::lround(gs_fx_ * point_c.x() / point_c.z() + gs_cx_));
+    const int v = static_cast<int>(std::lround(gs_fy_ * point_c.y() / point_c.z() + gs_cy_));
+    if (u < 0 || u >= gs_image_width_ || v < 0 || v >= gs_image_height_) continue;
+
+    const double eigen_sum = std::max(1e-12, match.min_eigen_value_ +
+        match.mid_eigen_value_ + match.max_eigen_value_);
+    const double planarity = std::max(0.0, std::min(1.0,
+        1.0 - match.min_eigen_value_ / eigen_sum));
+    const double variance_trace = match.plane_var_.diagonal().sum();
+    const double uncertainty = 1.0 / (1.0 + std::max(0.0, variance_trace));
+    const float confidence = static_cast<float>(planarity * uncertainty);
+    if (confidence < gs_plane_min_confidence_) continue;
+
+    GSPlaneSample sample;
+    sample.point_w = match.point_w_.cast<float>();
+    sample.center_w = match.center_.cast<float>();
+    sample.normal_w = match.normal_.normalized().cast<float>();
+    sample.plane_d = static_cast<float>(match.d_);
+    sample.confidence = confidence;
+    sample.radius = static_cast<float>(match.radius_);
+    sample.eigen_min = static_cast<float>(match.min_eigen_value_);
+    sample.eigen_mid = static_cast<float>(match.mid_eigen_value_);
+    sample.eigen_max = static_cast<float>(match.max_eigen_value_);
+    sample.plane_id = static_cast<uint32_t>(std::max(0, match.plane_id_));
+    planes.push_back(sample);
+    if (max_samples > 0 && planes.size() >= max_samples) break;
+  }
+  return planes;
+}
+
+sensor_msgs::PointCloud2 LIVMapper::build_3dgs_plane_message(
+    const std::vector<GSPlaneSample> &planes, const std_msgs::Header &header) const
+{
+  sensor_msgs::PointCloud2 message;
+  message.header = header;
+  sensor_msgs::PointCloud2Modifier modifier(message);
+  modifier.setPointCloud2Fields(
+      16,
+      "x", 1, sensor_msgs::PointField::FLOAT32,
+      "y", 1, sensor_msgs::PointField::FLOAT32,
+      "z", 1, sensor_msgs::PointField::FLOAT32,
+      "normal_x", 1, sensor_msgs::PointField::FLOAT32,
+      "normal_y", 1, sensor_msgs::PointField::FLOAT32,
+      "normal_z", 1, sensor_msgs::PointField::FLOAT32,
+      "center_x", 1, sensor_msgs::PointField::FLOAT32,
+      "center_y", 1, sensor_msgs::PointField::FLOAT32,
+      "center_z", 1, sensor_msgs::PointField::FLOAT32,
+      "plane_d", 1, sensor_msgs::PointField::FLOAT32,
+      "confidence", 1, sensor_msgs::PointField::FLOAT32,
+      "radius", 1, sensor_msgs::PointField::FLOAT32,
+      "eigen_min", 1, sensor_msgs::PointField::FLOAT32,
+      "eigen_mid", 1, sensor_msgs::PointField::FLOAT32,
+      "eigen_max", 1, sensor_msgs::PointField::FLOAT32,
+      "plane_id", 1, sensor_msgs::PointField::UINT32);
+  modifier.resize(planes.size());
+
+  sensor_msgs::PointCloud2Iterator<float> x(message, "x"), y(message, "y"), z(message, "z");
+  sensor_msgs::PointCloud2Iterator<float> nx(message, "normal_x"), ny(message, "normal_y"), nz(message, "normal_z");
+  sensor_msgs::PointCloud2Iterator<float> cx(message, "center_x"), cy(message, "center_y"), cz(message, "center_z");
+  sensor_msgs::PointCloud2Iterator<float> plane_d(message, "plane_d"), confidence(message, "confidence");
+  sensor_msgs::PointCloud2Iterator<float> radius(message, "radius"), eigen_min(message, "eigen_min");
+  sensor_msgs::PointCloud2Iterator<float> eigen_mid(message, "eigen_mid"), eigen_max(message, "eigen_max");
+  sensor_msgs::PointCloud2Iterator<uint32_t> plane_id(message, "plane_id");
+  for (const auto &plane : planes)
+  {
+    *x = plane.point_w.x(); *y = plane.point_w.y(); *z = plane.point_w.z();
+    *nx = plane.normal_w.x(); *ny = plane.normal_w.y(); *nz = plane.normal_w.z();
+    *cx = plane.center_w.x(); *cy = plane.center_w.y(); *cz = plane.center_w.z();
+    *plane_d = plane.plane_d; *confidence = plane.confidence; *radius = plane.radius;
+    *eigen_min = plane.eigen_min; *eigen_mid = plane.eigen_mid; *eigen_max = plane.eigen_max;
+    *plane_id = plane.plane_id;
+    ++x; ++y; ++z; ++nx; ++ny; ++nz; ++cx; ++cy; ++cz; ++plane_d; ++confidence;
+    ++radius; ++eigen_min; ++eigen_mid; ++eigen_max; ++plane_id;
+  }
+  return message;
+}
+
 cv::Mat LIVMapper::build_3dgs_depth(VIOManagerPtr vio_manager) const
 {
   cv::Mat depth = cv::Mat::zeros(gs_image_height_, gs_image_width_, CV_32FC1);
@@ -1582,7 +1689,8 @@ cv::Mat LIVMapper::build_3dgs_depth_from_clouds(const Eigen::Quaterniond &q_wc, 
   return depth;
 }
 
-void LIVMapper::log_3dgs_packet(double timestamp, const Eigen::Quaterniond &q_wc, const Eigen::Vector3d &t_wc, size_t point_count,
+void LIVMapper::log_3dgs_packet(double timestamp, const Eigen::Quaterniond &q_wc, const Eigen::Vector3d &t_wc,
+                                size_t point_count, size_t plane_count,
                                 double visual_score, double lidar_score, double fused_score, double imu_score,
                                 double semantic_risk_visual, double semantic_risk_lidar)
 {
@@ -1611,8 +1719,9 @@ void LIVMapper::log_3dgs_packet(double timestamp, const Eigen::Quaterniond &q_wc
                      << ",\"depth_loss\":" << lidar_score
                      << ",\"geometry_loss\":" << fused_score
                      << ",\"pose_prior\":" << imu_score << "}"
-                     << ",\"topics\":{\"image\":\"/image_for_gs\",\"depth\":\"/depth_for_gs\",\"pose\":\"/pose_for_gs\",\"points\":\"/points_for_gs\"}"
+                     << ",\"topics\":{\"image\":\"/image_for_gs\",\"depth\":\"/depth_for_gs\",\"pose\":\"/pose_for_gs\",\"points\":\"/points_for_gs\",\"planes\":\"/planes_for_gs\"}"
                      << ",\"point_count\":" << point_count
+                     << ",\"plane_count\":" << plane_count
                      << "}"
                      << std::endl;
   }
@@ -1633,6 +1742,7 @@ void LIVMapper::publish_3dgs_interface(VIOManagerPtr vio_manager, double timesta
   frame.image_bgr = prepare_3dgs_image(vio_manager);
   if (frame.image_bgr.empty()) return;
   frame.cloud = build_3dgs_cloud(q_wc, t_wc, frame.image_bgr);
+  frame.planes = build_3dgs_plane_submap(q_wc, t_wc);
   frame.visual_score = gs_visual_score_;
   frame.lidar_score = gs_lidar_score_;
   frame.semantic_risk_visual = semantic_risk_visual_;
@@ -1676,7 +1786,8 @@ void LIVMapper::flush_pending_3dgs_frames(VIOManagerPtr vio_manager, bool force_
       ROS_INFO_STREAM("[3DGS Contract] first aligned packet t=" << std::fixed << std::setprecision(9)
                       << frame.timestamp << " image=" << frame.image_bgr.cols << "x" << frame.image_bgr.rows
                       << " depth_nonzero=" << cv::countNonZero(depth)
-                      << " points=" << frame.cloud->size());
+                      << " points=" << frame.cloud->size()
+                      << " planes=" << frame.planes.size());
       gs_contract_logged_ = true;
     }
     ros::Time stamp;
@@ -1713,6 +1824,11 @@ void LIVMapper::flush_pending_3dgs_frames(VIOManagerPtr vio_manager, bool force_
     point_msg.header = pose_msg.header;
     pubGSPoints.publish(point_msg);
 
+    if (gs_plane_output_en_)
+    {
+      pubGSPlanes.publish(build_3dgs_plane_message(frame.planes, pose_msg.header));
+    }
+
     geometry_msgs::QuaternionStamped weight_msg;
     weight_msg.header = pose_msg.header;
     weight_msg.quaternion.x = frame.visual_score;
@@ -1735,7 +1851,8 @@ void LIVMapper::flush_pending_3dgs_frames(VIOManagerPtr vio_manager, bool force_
                               << frame.lidar_score << ","
                               << frame.fused_score << ","
                               << frame.imu_score << ","
-                              << frame.cloud->size()
+                              << frame.cloud->size() << ","
+                              << frame.planes.size()
                               << std::endl;
     }
 
@@ -1746,10 +1863,12 @@ void LIVMapper::flush_pending_3dgs_frames(VIOManagerPtr vio_manager, bool force_
               << " fused=" << frame.fused_score
               << " imu=" << frame.imu_score
               << " points=" << frame.cloud->size()
+              << " planes=" << frame.planes.size()
               << " publish_delay=" << delay_frames
               << std::endl;
 
-    log_3dgs_packet(frame.timestamp, frame.q_wc, frame.t_wc, frame.cloud->size(),
+    log_3dgs_packet(frame.timestamp, frame.q_wc, frame.t_wc,
+                    frame.cloud->size(), frame.planes.size(),
                     frame.visual_score, frame.lidar_score, frame.fused_score, frame.imu_score,
                     frame.semantic_risk_visual, frame.semantic_risk_lidar);
     gs_pending_frames_.pop_front();

@@ -69,6 +69,9 @@ public:
         select_every_k_frame_(prm.select_every_k_frame),
         depth_completion_(prm.depth_completion),
         patch_size_(prm.patch_size), max_depth_(prm.max_depth),
+        frontend_plane_supervision_(prm.frontend_plane_supervision),
+        frontend_plane_splat_radius_(std::max(0, prm.frontend_plane_splat_radius)),
+        frontend_plane_min_confidence_(static_cast<float>(std::max(0.0, prm.frontend_plane_min_confidence))),
         online_semantic_enabled_(prm.online_semantic_enabled),
         semantic_confidence_threshold_(prm.semantic_confidence_threshold),
         semantic_compact_dim_config_(std::max(0, prm.semantic_compact_dim)),
@@ -102,6 +105,9 @@ public:
     bool depth_completion_;
     int patch_size_;
     double max_depth_;
+    bool frontend_plane_supervision_;
+    int frontend_plane_splat_radius_;
+    float frontend_plane_min_confidence_;
     bool online_semantic_enabled_;
     float semantic_confidence_threshold_;
     int semantic_compact_dim_config_;
@@ -297,6 +303,8 @@ public:
     double lambda_normal_;
     bool optimize_point_plane_;
     double lambda_point_plane_;
+    bool frontend_plane_supervision_;
+    bool frontend_plane_fallback_to_depth_;
     double geometry_depth_discontinuity_ratio_;
     double point_plane_charbonnier_eps_;
     bool iteration_decay_;

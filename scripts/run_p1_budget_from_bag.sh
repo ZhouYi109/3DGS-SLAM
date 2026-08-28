@@ -21,6 +21,10 @@ geometry_optimize_point_plane="${GEOMETRY_OPTIMIZE_POINT_PLANE:-false}"
 geometry_lambda_point_plane="${GEOMETRY_LAMBDA_POINT_PLANE:-0.0}"
 geometry_depth_discontinuity_ratio="${GEOMETRY_DEPTH_DISCONTINUITY_RATIO:-0.05}"
 geometry_point_plane_eps="${GEOMETRY_POINT_PLANE_EPS:-0.001}"
+frontend_plane_supervision="${FRONTEND_PLANE_SUPERVISION:-false}"
+frontend_plane_splat_radius="${FRONTEND_PLANE_SPLAT_RADIUS:-2}"
+frontend_plane_min_confidence="${FRONTEND_PLANE_MIN_CONFIDENCE:-0.2}"
+frontend_plane_fallback_to_depth="${FRONTEND_PLANE_FALLBACK_TO_DEPTH:-false}"
 gaussian_root="/root/autodl-tmp/catkin_gaussian/src/Gaussian-LIC"
 config_path="${gaussian_root}/config/r3live_p1.yaml"
 # The persistent mount can temporarily reject new directory entries despite
@@ -136,6 +140,10 @@ stdbuf -oL -eL "${gaussian_root}/../../devel/lib/gaussian_lic/gs_mapping" \
     _lambda_point_plane:="${geometry_lambda_point_plane}" \
     _geometry_depth_discontinuity_ratio:="${geometry_depth_discontinuity_ratio}" \
     _point_plane_charbonnier_eps:="${geometry_point_plane_eps}" \
+    _frontend_plane_supervision:="${frontend_plane_supervision}" \
+    _frontend_plane_splat_radius:="${frontend_plane_splat_radius}" \
+    _frontend_plane_min_confidence:="${frontend_plane_min_confidence}" \
+    _frontend_plane_fallback_to_depth:="${frontend_plane_fallback_to_depth}" \
     _evaluation_save_images:="${evaluation_save_images}" \
     >"${log_dir}/gaussian.log" 2>&1 &
 gaussian_pid=$!
@@ -202,6 +210,10 @@ geometry_optimize_point_plane=${geometry_optimize_point_plane}
 geometry_lambda_point_plane=${geometry_lambda_point_plane}
 geometry_depth_discontinuity_ratio=${geometry_depth_discontinuity_ratio}
 geometry_point_plane_eps=${geometry_point_plane_eps}
+frontend_plane_supervision=${frontend_plane_supervision}
+frontend_plane_splat_radius=${frontend_plane_splat_radius}
+frontend_plane_min_confidence=${frontend_plane_min_confidence}
+frontend_plane_fallback_to_depth=${frontend_plane_fallback_to_depth}
 EOF
 cp "${config_path}" "${result_dir}/r3live_p1.yaml"
 find "${result_dir}" -maxdepth 3 -type f | sort >"${result_dir}/file_manifest.txt"
@@ -217,3 +229,4 @@ echo "ITERATION_BUDGET=${iteration_budget}"
 echo "GEOMETRY_DEPTH=${geometry_optimize_depth}:${geometry_lambda_depth}"
 echo "GEOMETRY_NORMAL=${geometry_optimize_normal}:${geometry_lambda_normal}"
 echo "GEOMETRY_POINT_PLANE=${geometry_optimize_point_plane}:${geometry_lambda_point_plane}"
+echo "FRONTEND_PLANES=${frontend_plane_supervision}:radius=${frontend_plane_splat_radius}:confidence=${frontend_plane_min_confidence}"

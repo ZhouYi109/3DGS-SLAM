@@ -37,6 +37,7 @@ std::mutex m_buf;
 std::condition_variable con;
 
 std::queue<sensor_msgs::PointCloud2ConstPtr> point_buf;
+std::queue<sensor_msgs::PointCloud2ConstPtr> plane_buf;
 std::queue<long long> point_arrival_wall_time_ns;
 std::queue<geometry_msgs::PoseStampedConstPtr> pose_buf;
 std::queue<geometry_msgs::QuaternionStampedConstPtr> weight_buf;
@@ -51,6 +52,8 @@ std::atomic<long long> last_point_wall_time_ns(0);
 std::atomic<bool> received_any_point(false);
 std::atomic<bool> gaussians_initialized(false);
 std::atomic<bool> online_semantic_enabled(true);
+std::atomic<bool> frontend_plane_supervision_enabled(false);
+std::atomic<double> frontend_plane_sync_tolerance_sec(0.01);
 std::atomic<double> semantic_sync_tolerance_sec(0.02);
 std::atomic<double> semantic_wait_timeout_sec(0.0);
 std::atomic<bool> semantic_wait_pending_only(false);
@@ -178,6 +181,12 @@ void pointCallback(const sensor_msgs::PointCloud2ConstPtr& point_msg)
     m_buf.unlock();
 }
 
+void planeCallback(const sensor_msgs::PointCloud2ConstPtr& plane_msg)
+{
+    std::lock_guard<std::mutex> lock(m_buf);
+    plane_buf.push(plane_msg);
+}
+
 void poseCallback(const geometry_msgs::PoseStampedConstPtr& pose_msg) 
 {
     m_buf.lock();
@@ -244,12 +253,30 @@ void semanticPendingCallback(const std_msgs::HeaderConstPtr& pending_msg)
 
 bool getAlignedData(Frame& cur_frame)
 {
-    if (point_buf.empty() || pose_buf.empty() || image_buf.empty() || depth_buf.empty()) 
+    if (point_buf.empty() || pose_buf.empty() || image_buf.empty() || depth_buf.empty() ||
+        (frontend_plane_supervision_enabled.load() && plane_buf.empty()))
     {
         return false;
     }
 
     double frame_time = point_buf.front()->header.stamp.toSec();
+    sensor_msgs::PointCloud2ConstPtr cur_plane;
+    if (frontend_plane_supervision_enabled.load())
+    {
+        const double tolerance = frontend_plane_sync_tolerance_sec.load();
+        while (!plane_buf.empty() &&
+               plane_buf.front()->header.stamp.toSec() < frame_time - tolerance)
+        {
+            plane_buf.pop();
+        }
+        if (plane_buf.empty()) return false;
+        if (plane_buf.front()->header.stamp.toSec() > frame_time + tolerance)
+        {
+            popPointFront();
+            return false;
+        }
+        cur_plane = plane_buf.front();
+    }
     if (online_semantic_enabled && semantic_wait_timeout_sec.load() > 0.0)
     {
         const double tolerance = semantic_sync_tolerance_sec.load();
@@ -448,6 +475,7 @@ bool getAlignedData(Frame& cur_frame)
     }
 
     cur_frame.point_msg = cur_point;
+    cur_frame.plane_msg = cur_plane;
     cur_frame.pose_msg = cur_pose;
     cur_frame.weight_msg = cur_weight;
     cur_frame.image_msg = cur_image;
@@ -478,6 +506,7 @@ bool getAlignedData(Frame& cur_frame)
         }
     }
     popPointFront();
+    if (cur_plane) plane_buf.pop();
     pose_buf.pop();
     if (cur_weight) weight_buf.pop();
     if (cur_semantic) semantic_feature_buf.pop();
@@ -508,10 +537,14 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     if (prm.lambda_depth < 0.0 || prm.lambda_normal < 0.0 ||
         prm.lambda_point_plane < 0.0 ||
         prm.geometry_depth_discontinuity_ratio < 0.0 ||
-        prm.point_plane_charbonnier_eps <= 0.0)
+        prm.point_plane_charbonnier_eps <= 0.0 ||
+        prm.frontend_plane_sync_tolerance_sec < 0.0 ||
+        prm.frontend_plane_splat_radius < 0 ||
+        prm.frontend_plane_min_confidence < 0.0 ||
+        prm.frontend_plane_min_confidence > 1.0)
     {
         throw std::invalid_argument(
-            "Geometry loss weights/edge ratio must be non-negative and Charbonnier epsilon positive");
+            "Invalid geometry loss or frontend plane supervision configuration");
     }
     std::cout << "[Gaussian-LIC Geometry Loss] depth="
               << (prm.optimize_depth ? "true" : "false")
@@ -523,6 +556,12 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
               << " (lambda=" << prm.lambda_point_plane << ")"
               << ", edge_ratio=" << prm.geometry_depth_discontinuity_ratio
               << ", charbonnier_eps=" << prm.point_plane_charbonnier_eps
+              << ", frontend_planes="
+              << (prm.frontend_plane_supervision ? "true" : "false")
+              << ", plane_splat_radius=" << prm.frontend_plane_splat_radius
+              << ", plane_min_confidence=" << prm.frontend_plane_min_confidence
+              << ", plane_fallback_to_depth="
+              << (prm.frontend_plane_fallback_to_depth ? "true" : "false")
               << std::endl;
     torch::manual_seed(prm.random_seed);
     torch::cuda::manual_seed_all(prm.random_seed);
@@ -635,7 +674,8 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
             << "keyframe_id,frame_id,stamp,p1_mode,iteration_budget,"
             << "pending_candidates,map_gaussians_before_extend,"
             << "map_gaussians_after_extend,rgb_weight,depth_weight,"
-            << "geometry_weight,pose_weight,extend_ms,optimize_ms,"
+            << "geometry_weight,pose_weight,frontend_plane_samples,"
+            << "frontend_plane_valid_pixels,frontend_plane_valid_ratio,extend_ms,optimize_ms,"
             << "updated_gaussians\n";
         std::cout << "[Gaussian-LIC P1] enabled, mode=" << p1_mode
                   << ", light_iters=" << p1_light_iters
@@ -690,6 +730,19 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
             std::cout << " [KF=" << keyframe_count << "]";
         }
         else continue;
+
+        const auto& current_camera = dataset->train_cameras_.back();
+        const double frontend_plane_valid_ratio =
+            static_cast<double>(current_camera->frontend_plane_valid_pixels_) /
+            std::max(1, current_camera->image_width_ * current_camera->image_height_);
+        if (prm.frontend_plane_supervision)
+        {
+            std::cout << " [Frontend Plane samples="
+                      << current_camera->frontend_plane_sample_count_
+                      << ", pixels=" << current_camera->frontend_plane_valid_pixels_
+                      << ", ratio=" << std::fixed << std::setprecision(6)
+                      << frontend_plane_valid_ratio << "]";
+        }
 
         const int64_t pending_candidates =
             static_cast<int64_t>(dataset->pointcloud_.size());
@@ -777,6 +830,9 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
                 << latest_weight(dataset->frame_depth_weights_) << ','
                 << latest_weight(dataset->frame_geometry_weights_) << ','
                 << latest_weight(dataset->frame_pose_weights_) << ','
+                << current_camera->frontend_plane_sample_count_ << ','
+                << current_camera->frontend_plane_valid_pixels_ << ','
+                << frontend_plane_valid_ratio << ','
                 << extend_ms << ',' << optimize_ms << ',' << updated_num << '\n';
             p1_telemetry.flush();
         }
@@ -953,6 +1009,43 @@ int main(int argc, char** argv)
     std::string config_path;
     nh.param<std::string>("config_path", config_path, "");
     YAML::Node config_node = YAML::LoadFile(config_path);
+    bool frontend_plane_supervision = config_node["frontend_plane_supervision"]
+        ? config_node["frontend_plane_supervision"].as<bool>() : false;
+    nh.param<bool>("frontend_plane_supervision", frontend_plane_supervision,
+                   frontend_plane_supervision);
+    config_node["frontend_plane_supervision"] = frontend_plane_supervision;
+    std::string frontend_plane_topic = config_node["frontend_plane_topic"]
+        ? config_node["frontend_plane_topic"].as<std::string>() : "/planes_for_gs";
+    nh.param<std::string>("frontend_plane_topic", frontend_plane_topic,
+                          frontend_plane_topic);
+    config_node["frontend_plane_topic"] = frontend_plane_topic;
+    double frontend_plane_sync_tolerance = config_node["frontend_plane_sync_tolerance_sec"]
+        ? config_node["frontend_plane_sync_tolerance_sec"].as<double>() : 0.01;
+    nh.param<double>("frontend_plane_sync_tolerance_sec", frontend_plane_sync_tolerance,
+                     frontend_plane_sync_tolerance);
+    config_node["frontend_plane_sync_tolerance_sec"] = frontend_plane_sync_tolerance;
+    int frontend_plane_splat_radius = config_node["frontend_plane_splat_radius"]
+        ? config_node["frontend_plane_splat_radius"].as<int>() : 2;
+    nh.param<int>("frontend_plane_splat_radius", frontend_plane_splat_radius,
+                  frontend_plane_splat_radius);
+    config_node["frontend_plane_splat_radius"] = frontend_plane_splat_radius;
+    double frontend_plane_min_confidence = config_node["frontend_plane_min_confidence"]
+        ? config_node["frontend_plane_min_confidence"].as<double>() : 0.2;
+    nh.param<double>("frontend_plane_min_confidence", frontend_plane_min_confidence,
+                     frontend_plane_min_confidence);
+    config_node["frontend_plane_min_confidence"] = frontend_plane_min_confidence;
+    bool frontend_plane_fallback_to_depth = config_node["frontend_plane_fallback_to_depth"]
+        ? config_node["frontend_plane_fallback_to_depth"].as<bool>() : false;
+    nh.param<bool>("frontend_plane_fallback_to_depth", frontend_plane_fallback_to_depth,
+                   frontend_plane_fallback_to_depth);
+    config_node["frontend_plane_fallback_to_depth"] = frontend_plane_fallback_to_depth;
+    frontend_plane_supervision_enabled = frontend_plane_supervision;
+    frontend_plane_sync_tolerance_sec = frontend_plane_sync_tolerance;
+    ros::Subscriber sub_plane;
+    if (frontend_plane_supervision)
+    {
+        sub_plane = nh.subscribe(frontend_plane_topic, 10000, planeCallback);
+    }
     std::string result_path;
     nh.param<std::string>("result_path", result_path, "");
     std::string lpips_path;
