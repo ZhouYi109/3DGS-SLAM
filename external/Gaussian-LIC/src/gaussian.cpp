@@ -49,6 +49,63 @@ float clamp_weight(float value, float min_value = 0.2f, float max_value = 1.0f)
     return std::max(min_value, std::min(max_value, value));
 }
 
+float robustPercentile95(const cv::Mat& image)
+{
+    std::vector<float> values;
+    values.reserve(image.total());
+    for (int row = 0; row < image.rows; ++row)
+    {
+        const float* data = image.ptr<float>(row);
+        for (int col = 0; col < image.cols; ++col)
+        {
+            if (std::isfinite(data[col]) && data[col] > 0.0f)
+            {
+                values.push_back(data[col]);
+            }
+        }
+    }
+    if (values.empty()) return 1.0f;
+    const std::size_t index = static_cast<std::size_t>(
+        0.95 * static_cast<double>(values.size() - 1));
+    std::nth_element(values.begin(), values.begin() + index, values.end());
+    return std::max(values[index], 1e-6f);
+}
+
+torch::Tensor buildMissingDetailMap(
+    const torch::Tensor& real_image,
+    const torch::Tensor& rendered_image,
+    float sigma_small,
+    float sigma_large,
+    float threshold)
+{
+    auto real_cpu = real_image.detach().to(torch::kCPU).to(torch::kFloat32).contiguous();
+    auto render_cpu = rendered_image.detach().to(torch::kCPU).to(torch::kFloat32).contiguous();
+    cv::Mat real_rgb = tensor_utils::torchTensor2CvMat_Float32(real_cpu);
+    cv::Mat render_rgb = tensor_utils::torchTensor2CvMat_Float32(render_cpu);
+    cv::Mat real_gray, render_gray;
+    cv::cvtColor(real_rgb, real_gray, cv::COLOR_RGB2GRAY);
+    cv::cvtColor(render_rgb, render_gray, cv::COLOR_RGB2GRAY);
+
+    const double small = std::max(0.1f, sigma_small);
+    const double large = std::max(small + 0.1, static_cast<double>(sigma_large));
+    cv::Mat real_small, real_large, render_small, render_large;
+    cv::GaussianBlur(real_gray, real_small, cv::Size(), small, small, cv::BORDER_REFLECT101);
+    cv::GaussianBlur(real_gray, real_large, cv::Size(), large, large, cv::BORDER_REFLECT101);
+    cv::GaussianBlur(render_gray, render_small, cv::Size(), small, small, cv::BORDER_REFLECT101);
+    cv::GaussianBlur(render_gray, render_large, cv::Size(), large, large, cv::BORDER_REFLECT101);
+
+    cv::Mat real_dog = cv::abs(real_small - real_large);
+    cv::Mat render_dog = cv::abs(render_small - render_large);
+    real_dog /= robustPercentile95(real_dog);
+    render_dog /= robustPercentile95(render_dog);
+    cv::min(real_dog, cv::Scalar(1.0f), real_dog);
+    cv::min(render_dog, cv::Scalar(1.0f), render_dog);
+    cv::Mat missing = real_dog - render_dog - std::max(0.0f, threshold);
+    cv::max(missing, cv::Scalar(0.0f), missing);
+    cv::min(missing, cv::Scalar(1.0f), missing);
+    return tensor_utils::cvMat2TorchTensor_Float32(missing, torch::kCUDA);
+}
+
 struct DepthSurface
 {
     torch::Tensor points;
@@ -3507,6 +3564,8 @@ void GaussianModel::observeDensificationEvidence(
     auto indices = torch::nonzero(visible_mask).squeeze(1);
     if (indices.numel() == 0) return;
     auto gradients = screenspace_points.grad().detach().index({indices, torch::indexing::Slice(0, 2)});
+    // This is screen-space position-gradient evidence, not a photometric
+    // residual. Keep the stored tensors for checkpoint/source compatibility.
     auto residual = gradients.norm(2, 1).clamp(0.0f, 1.0f);
     auto old_count = densify_visible_count_.index({indices});
     auto next_count = old_count + 1.0f;
@@ -3523,9 +3582,28 @@ void GaussianModel::observeDensificationEvidence(
     densify_visible_count_.index_put_({indices}, next_count);
 }
 
+void GaussianModel::setLatestMissingDetailMap(
+    const torch::Tensor& missing_detail,
+    const std::shared_ptr<Camera>& camera)
+{
+    if (!missing_detail.defined() || missing_detail.dim() != 2 || !camera)
+    {
+        latest_missing_detail_ = torch::Tensor();
+        return;
+    }
+    latest_missing_detail_ = missing_detail.detach().to(xyz_.device()).to(torch::kFloat32).contiguous();
+    latest_detail_R_cw_ = camera->R_cw_;
+    latest_detail_t_cw_ = camera->t_cw_;
+    latest_detail_fx_ = camera->fx_;
+    latest_detail_fy_ = camera->fy_;
+    latest_detail_cx_ = camera->cx_;
+    latest_detail_cy_ = camera->cy_;
+}
+
 int64_t GaussianModel::densifyReliableTopK(
     const std::string& mode, int top_k, int min_views, int n0,
-    float variance_tau, float scale_shrink)
+    float variance_tau, float scale_shrink,
+    float detail_weight, float detail_floor)
 {
     torch::NoGradGuard no_grad;
     if (top_k <= 0 || xyz_.size(0) <= skybox_points_num_) return 0;
@@ -3538,6 +3616,43 @@ int64_t GaussianModel::densifyReliableTopK(
     {
         auto variance = densify_residual_m2_ / (densify_visible_count_ - 1.0f).clamp_min(1.0f);
         score *= torch::exp(-variance / std::max(1e-6f, variance_tau * variance_tau));
+    }
+    if (detail_weight > 0.0f && latest_missing_detail_.defined() &&
+        latest_missing_detail_.numel() > 0)
+    {
+        std::vector<float> rotation(9);
+        std::vector<float> translation(3);
+        for (int row = 0; row < 3; ++row)
+        {
+            translation[row] = static_cast<float>(latest_detail_t_cw_(row));
+            for (int col = 0; col < 3; ++col)
+            {
+                rotation[3 * row + col] = static_cast<float>(latest_detail_R_cw_(row, col));
+            }
+        }
+        auto R_cw = torch::from_blob(rotation.data(), {3, 3}, torch::kFloat32).clone().to(xyz_.device());
+        auto t_cw = torch::from_blob(translation.data(), {3}, torch::kFloat32).clone().to(xyz_.device());
+        auto camera_points = torch::matmul(xyz_.detach(), R_cw.t()) + t_cw;
+        auto z = camera_points.index({torch::indexing::Slice(), 2});
+        auto safe_z = z.clamp_min(1e-6f);
+        auto x = (camera_points.index({torch::indexing::Slice(), 0}) * latest_detail_fx_ / safe_z
+            + latest_detail_cx_).round().to(torch::kLong);
+        auto y = (camera_points.index({torch::indexing::Slice(), 1}) * latest_detail_fy_ / safe_z
+            + latest_detail_cy_).round().to(torch::kLong);
+        const int64_t height = latest_missing_detail_.size(0);
+        const int64_t width = latest_missing_detail_.size(1);
+        auto valid = (z > 0.0f) & (x >= 0) & (x < width) & (y >= 0) & (y < height);
+        auto detail = torch::zeros_like(score);
+        auto valid_indices = torch::nonzero(valid).squeeze(1);
+        if (valid_indices.numel() > 0)
+        {
+            detail.index_put_({valid_indices}, latest_missing_detail_.index({
+                y.index({valid_indices}), x.index({valid_indices})}));
+        }
+        const float weight = std::max(0.0f, detail_weight);
+        const float floor = std::clamp(detail_floor, 1e-4f, 1.0f);
+        auto detail_gate = floor + (1.0f - floor) * detail.clamp(0.0f, 1.0f);
+        score *= torch::pow(detail_gate, weight);
     }
     score.index({torch::indexing::Slice(0, skybox_points_num_)}).fill_(-1.0f);
     score.masked_fill_(densify_visible_count_ < static_cast<float>(std::max(1, min_views)), -1.0f);
@@ -3888,15 +4003,25 @@ void GaussianModel::pruneGaussians(const torch::Tensor& keep_mask)
     assertSemanticAlignment();
 }
 
-void extend(
+ExtensionStats extend(
     const std::shared_ptr<Dataset>& dataset,
     std::shared_ptr<GaussianModel>& pc,
     bool candidate_dedup_enabled,
     int candidate_dedup_pixel_stride,
     float candidate_dedup_max_alpha,
-    float candidate_dedup_depth_tolerance)
+    float candidate_dedup_depth_tolerance,
+    bool detail_spawn_enabled,
+    int detail_spawn_top_k,
+    int detail_spawn_pixel_stride,
+    float detail_spawn_sigma_small,
+    float detail_spawn_sigma_large,
+    float detail_spawn_threshold,
+    float detail_spawn_alpha_power,
+    float detail_spawn_detail_power,
+    float detail_spawn_min_geometry_weight)
 {
     torch::NoGradGuard no_grad;
+    ExtensionStats stats;
     torch::Tensor bg;
     if (pc->white_background_) bg = torch::ones({3}, torch::kFloat32).cuda();
     else bg = torch::zeros({3}, torch::kFloat32).cuda();
@@ -3904,13 +4029,22 @@ void extend(
     auto render_pkg = render(viewpoint_cam, pc, bg, pc->apply_exposure_, true);
     auto rendered_alpha = 1 - std::get<2>(render_pkg).squeeze(0);
     auto rendered_depth = std::get<1>(render_pkg).squeeze();
+    torch::Tensor missing_detail;
+    if (detail_spawn_enabled)
+    {
+        missing_detail = buildMissingDetailMap(
+            viewpoint_cam->original_image_, std::get<0>(render_pkg).clamp(0.0f, 1.0f),
+            detail_spawn_sigma_small, detail_spawn_sigma_large,
+            detail_spawn_threshold);
+        pc->setLatestMissingDetailMap(missing_detail, viewpoint_cam);
+    }
 
     int n = dataset->pointcloud_.size();
     if (n == 0)
     {
         std::cout << "\033[1;32m Insert 0.00k GS,\033[0m";
         dataset->clearPendingPoints();
-        return;
+        return stats;
     }
     std::vector<float> float_point(n * 3);
     std::vector<float> float_color(n * 3);
@@ -4120,6 +4254,7 @@ void extend(
         filtered_semantic_risk.index({valid_semantic_mask});
     filtered_semantic_observation_count =
         filtered_semantic_observation_count.index({valid_semantic_mask});
+    stats.visible_candidates = fused_point_cloud.size(0);
 
     if (candidate_dedup_enabled && fused_point_cloud.size(0) > 0)
     {
@@ -4193,6 +4328,98 @@ void extend(
         }
         std::cout << " [candidate gate " << candidate_count << "->"
                   << kept_candidates << "]";
+    }
+    if (detail_spawn_enabled && fused_point_cloud.size(0) > 0)
+    {
+        const int64_t candidate_count = fused_point_cloud.size(0);
+        const int stride = std::max(1, detail_spawn_pixel_stride);
+        const int top_k = std::max(0, detail_spawn_top_k);
+        auto x_coords = filtered_pixels.index({torch::indexing::Slice(), 0}).to(torch::kLong);
+        auto y_coords = filtered_pixels.index({torch::indexing::Slice(), 1}).to(torch::kLong);
+        auto detail = missing_detail.index({y_coords, x_coords}).clamp(0.0f, 1.0f);
+        auto alpha_hole = (1.0f - rendered_alpha.index({y_coords, x_coords})).clamp(0.0f, 1.0f);
+        auto score = torch::pow(detail, std::max(0.0f, detail_spawn_detail_power))
+            * torch::pow(alpha_hole, std::max(0.0f, detail_spawn_alpha_power));
+        if (filtered_semantic_risk.defined() &&
+            filtered_semantic_risk.numel() == candidate_count)
+        {
+            auto risk = filtered_semantic_risk.to(score.device()).clamp(0.0f, 1.0f);
+            auto observed = filtered_semantic_observation_count.to(score.device()) > 0;
+            auto static_confidence = torch::where(observed, 1.0f - risk, torch::ones_like(risk));
+            score *= static_confidence;
+        }
+        const float minimum_geometry = std::clamp(
+            detail_spawn_min_geometry_weight, 0.0f, 0.999f);
+        const float geometry_gate = std::clamp(
+            (latest_geometry_weight - minimum_geometry) /
+                std::max(1e-6f, 1.0f - minimum_geometry),
+            0.0f, 1.0f);
+        score *= geometry_gate;
+
+        auto score_cpu = score.to(torch::kCPU).to(torch::kFloat32).contiguous();
+        auto pixels_cpu = filtered_pixels.to(torch::kCPU).to(torch::kInt32).contiguous();
+        const float* score_data = score_cpu.data_ptr<float>();
+        const int* pixel_data = pixels_cpu.data_ptr<int>();
+        const int cells_per_row = (W + stride - 1) / stride;
+        std::unordered_map<int, int64_t> best_per_cell;
+        best_per_cell.reserve(static_cast<std::size_t>(candidate_count));
+        for (int64_t index = 0; index < candidate_count; ++index)
+        {
+            if (!std::isfinite(score_data[index]) || score_data[index] <= 0.0f) continue;
+            const int cell = (pixel_data[2 * index + 1] / stride) * cells_per_row
+                + pixel_data[2 * index] / stride;
+            const auto found = best_per_cell.find(cell);
+            if (found == best_per_cell.end() || score_data[index] > score_data[found->second])
+            {
+                best_per_cell[cell] = index;
+            }
+        }
+        std::vector<int64_t> selected;
+        selected.reserve(best_per_cell.size());
+        for (const auto& item : best_per_cell) selected.push_back(item.second);
+        std::sort(selected.begin(), selected.end(), [&](int64_t lhs, int64_t rhs)
+        {
+            return score_data[lhs] > score_data[rhs];
+        });
+        if (top_k >= 0 && selected.size() > static_cast<std::size_t>(top_k))
+        {
+            selected.resize(static_cast<std::size_t>(top_k));
+        }
+        stats.detail_candidates = selected.size();
+        if (!selected.empty())
+        {
+            double score_sum = 0.0;
+            for (const int64_t index : selected) score_sum += score_data[index];
+            stats.detail_score_mean = static_cast<float>(score_sum / selected.size());
+            stats.detail_score_max = score_data[selected.front()];
+        }
+        auto selected_cpu = selected.empty()
+            ? torch::empty({0}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU))
+            : torch::from_blob(
+                selected.data(), {static_cast<int64_t>(selected.size())}, torch::kInt64).clone();
+        auto selected_cuda = selected_cpu.to(fused_point_cloud.device());
+        fused_point_cloud = fused_point_cloud.index_select(0, selected_cuda);
+        fused_rgb = fused_rgb.index_select(0, selected_cuda);
+        fused_color = fused_color.index_select(0, selected_cuda);
+        filtered_depth_tensor = filtered_depth_tensor.index_select(0, selected_cuda);
+        filtered_pixels = filtered_pixels.index_select(0, selected_cuda);
+        filtered_semantic_memory_index = filtered_semantic_memory_index.index_select(0, selected_cpu);
+        filtered_semantic_confidence = filtered_semantic_confidence.index_select(0, selected_cpu);
+        filtered_semantic_risk = filtered_semantic_risk.index_select(0, selected_cpu);
+        filtered_semantic_observation_count = filtered_semantic_observation_count.index_select(0, selected_cpu);
+        if (filtered_prior_frame_context.defined())
+        {
+            filtered_prior_frame_context = filtered_prior_frame_context.index_select(0, selected_cuda);
+        }
+        std::cout << " [detail spawn " << candidate_count << "->"
+                  << selected.size() << ", mean=" << stats.detail_score_mean
+                  << ", max=" << stats.detail_score_max << "]";
+    }
+    if (fused_point_cloud.size(0) == 0)
+    {
+        std::cout << "\033[1;32m Insert 0.00k GS,\033[0m";
+        dataset->clearPendingPoints();
+        return stats;
     }
     if (fused_point_cloud.size(0) > 0 && keep_ratio < 0.999f)
     {
@@ -4369,6 +4596,8 @@ void extend(
               << "k GS" << (prior_applied ? " [prior]" : "") << ",\033[0m";
 
     dataset->clearPendingPoints();
+    stats.inserted = fused_point_cloud.size(0);
+    return stats;
 }
 
 void decayOptList(int max_iters, const int train_camera_num, 

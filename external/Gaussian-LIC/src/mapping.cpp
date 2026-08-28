@@ -541,11 +541,33 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         prm.frontend_plane_sync_tolerance_sec < 0.0 ||
         prm.frontend_plane_splat_radius < 0 ||
         prm.frontend_plane_min_confidence < 0.0 ||
-        prm.frontend_plane_min_confidence > 1.0)
+        prm.frontend_plane_min_confidence > 1.0 ||
+        prm.detail_spawn_top_k < 0 || prm.detail_spawn_pixel_stride <= 0 ||
+        prm.detail_spawn_sigma_small <= 0.0 ||
+        prm.detail_spawn_sigma_large <= prm.detail_spawn_sigma_small ||
+        prm.detail_spawn_threshold < 0.0 ||
+        prm.detail_spawn_alpha_power < 0.0 ||
+        prm.detail_spawn_detail_power < 0.0 ||
+        prm.detail_spawn_min_geometry_weight < 0.0 ||
+        prm.detail_spawn_min_geometry_weight > 1.0 ||
+        prm.reliable_densification_detail_weight < 0.0 ||
+        prm.reliable_densification_detail_floor <= 0.0 ||
+        prm.reliable_densification_detail_floor > 1.0)
     {
         throw std::invalid_argument(
-            "Invalid geometry loss or frontend plane supervision configuration");
+            "Invalid geometry-loss, frontend-plane, or detail-densification configuration");
     }
+    std::cout << "[Gaussian-LIC Detail Densification] spawn="
+              << (prm.detail_spawn_enabled ? "true" : "false")
+              << ", spawn_top_k=" << prm.detail_spawn_top_k
+              << ", pixel_stride=" << prm.detail_spawn_pixel_stride
+              << ", DoG_sigma=(" << prm.detail_spawn_sigma_small << ','
+              << prm.detail_spawn_sigma_large << ")"
+              << ", threshold=" << prm.detail_spawn_threshold
+              << ", reliable_clone_detail_weight="
+              << prm.reliable_densification_detail_weight
+              << ", reliable_clone_detail_floor="
+              << prm.reliable_densification_detail_floor << std::endl;
     std::cout << "[Gaussian-LIC Geometry Loss] depth="
               << (prm.optimize_depth ? "true" : "false")
               << " (lambda=" << prm.lambda_depth << ")"
@@ -676,7 +698,8 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
             << "map_gaussians_after_extend,rgb_weight,depth_weight,"
             << "geometry_weight,pose_weight,frontend_plane_samples,"
             << "frontend_plane_valid_pixels,frontend_plane_valid_ratio,extend_ms,optimize_ms,"
-            << "updated_gaussians\n";
+            << "spawn_visible_candidates,spawn_detail_candidates,spawn_inserted,"
+            << "spawn_score_mean,spawn_score_max,reliable_clone_inserted,updated_gaussians\n";
         std::cout << "[Gaussian-LIC P1] enabled, mode=" << p1_mode
                   << ", light_iters=" << p1_light_iters
                   << ", full_iters=" << p1_full_iters
@@ -749,6 +772,8 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         const int64_t map_gaussians_before_extend = gaussians->getXYZ().size(0);
         int64_t map_gaussians_after_extend = map_gaussians_before_extend;
         double extend_ms = 0.0;
+        ExtensionStats extension_stats;
+        int64_t reliable_clone_inserted = 0;
         if (!gaussians->is_init_)
         {
             /// [3] initialize map
@@ -765,11 +790,20 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
             const bool candidate_dedup_enabled =
                 p1_enabled && p1_mode == "direct_maintained" &&
                 prm.p1_candidate_dedup_enabled;
-            extend(
+            extension_stats = extend(
                 dataset, gaussians, candidate_dedup_enabled,
                 prm.p1_candidate_dedup_pixel_stride,
                 static_cast<float>(prm.p1_candidate_dedup_max_alpha),
-                static_cast<float>(prm.p1_candidate_dedup_depth_tolerance));
+                static_cast<float>(prm.p1_candidate_dedup_depth_tolerance),
+                prm.detail_spawn_enabled,
+                prm.detail_spawn_top_k,
+                prm.detail_spawn_pixel_stride,
+                static_cast<float>(prm.detail_spawn_sigma_small),
+                static_cast<float>(prm.detail_spawn_sigma_large),
+                static_cast<float>(prm.detail_spawn_threshold),
+                static_cast<float>(prm.detail_spawn_alpha_power),
+                static_cast<float>(prm.detail_spawn_detail_power),
+                static_cast<float>(prm.detail_spawn_min_geometry_weight));
             torch::cuda::synchronize();
             t_end = std::chrono::steady_clock::now();
             total_extending_time += std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
@@ -798,15 +832,17 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
             prm.reliable_densification_every_keyframes > 0 &&
             keyframe_count % prm.reliable_densification_every_keyframes == 0)
         {
-            const int64_t added = gaussians->densifyReliableTopK(
+            reliable_clone_inserted = gaussians->densifyReliableTopK(
                 prm.reliable_densification_mode,
                 prm.reliable_densification_top_k,
                 prm.reliable_densification_min_views,
                 prm.reliable_densification_n0,
                 static_cast<float>(prm.reliable_densification_variance_tau),
-                static_cast<float>(prm.reliable_densification_scale_shrink));
+                static_cast<float>(prm.reliable_densification_scale_shrink),
+                static_cast<float>(prm.reliable_densification_detail_weight),
+                static_cast<float>(prm.reliable_densification_detail_floor));
             std::cout << "[Reliable Densification] mode="
-                      << prm.reliable_densification_mode << ", added=" << added
+                      << prm.reliable_densification_mode << ", added=" << reliable_clone_inserted
                       << std::endl;
         }
         std::cout << std::fixed << std::setprecision(2) 
@@ -833,7 +869,13 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
                 << current_camera->frontend_plane_sample_count_ << ','
                 << current_camera->frontend_plane_valid_pixels_ << ','
                 << frontend_plane_valid_ratio << ','
-                << extend_ms << ',' << optimize_ms << ',' << updated_num << '\n';
+                << extend_ms << ',' << optimize_ms << ','
+                << extension_stats.visible_candidates << ','
+                << extension_stats.detail_candidates << ','
+                << extension_stats.inserted << ','
+                << extension_stats.detail_score_mean << ','
+                << extension_stats.detail_score_max << ','
+                << reliable_clone_inserted << ',' << updated_num << '\n';
             p1_telemetry.flush();
         }
 
@@ -1287,6 +1329,40 @@ int main(int argc, char** argv)
         p1_candidate_dedup_depth_tolerance,
         p1_candidate_dedup_depth_tolerance);
     config_node["p1_candidate_dedup_depth_tolerance"] = p1_candidate_dedup_depth_tolerance;
+    bool detail_spawn_enabled = config_node["detail_spawn_enabled"]
+        ? config_node["detail_spawn_enabled"].as<bool>() : false;
+    nh.param<bool>("detail_spawn_enabled", detail_spawn_enabled, detail_spawn_enabled);
+    config_node["detail_spawn_enabled"] = detail_spawn_enabled;
+    int detail_spawn_top_k = config_node["detail_spawn_top_k"]
+        ? config_node["detail_spawn_top_k"].as<int>() : 512;
+    nh.param<int>("detail_spawn_top_k", detail_spawn_top_k, detail_spawn_top_k);
+    config_node["detail_spawn_top_k"] = detail_spawn_top_k;
+    int detail_spawn_pixel_stride = config_node["detail_spawn_pixel_stride"]
+        ? config_node["detail_spawn_pixel_stride"].as<int>() : 4;
+    nh.param<int>("detail_spawn_pixel_stride", detail_spawn_pixel_stride, detail_spawn_pixel_stride);
+    config_node["detail_spawn_pixel_stride"] = detail_spawn_pixel_stride;
+    const std::array<std::string, 6> detail_double_keys = {
+        "detail_spawn_sigma_small", "detail_spawn_sigma_large",
+        "detail_spawn_threshold", "detail_spawn_alpha_power",
+        "detail_spawn_detail_power", "detail_spawn_min_geometry_weight",
+    };
+    const std::array<double, 6> detail_double_defaults = {0.5, 1.5, 0.10, 1.0, 1.0, 0.20};
+    for (std::size_t index = 0; index < detail_double_keys.size(); ++index)
+    {
+        const auto& key = detail_double_keys[index];
+        double value = config_node[key] ? config_node[key].as<double>()
+                                        : detail_double_defaults[index];
+        nh.param<double>(key, value, value);
+        config_node[key] = value;
+    }
+    double reliable_detail_weight = config_node["reliable_densification_detail_weight"]
+        ? config_node["reliable_densification_detail_weight"].as<double>() : 0.0;
+    nh.param<double>("reliable_densification_detail_weight", reliable_detail_weight, reliable_detail_weight);
+    config_node["reliable_densification_detail_weight"] = reliable_detail_weight;
+    double reliable_detail_floor = config_node["reliable_densification_detail_floor"]
+        ? config_node["reliable_densification_detail_floor"].as<double>() : 0.05;
+    nh.param<double>("reliable_densification_detail_floor", reliable_detail_floor, reliable_detail_floor);
+    config_node["reliable_densification_detail_floor"] = reliable_detail_floor;
     bool evaluation_save_images = config_node["evaluation_save_images"]
         ? config_node["evaluation_save_images"].as<bool>() : true;
     nh.param<bool>(

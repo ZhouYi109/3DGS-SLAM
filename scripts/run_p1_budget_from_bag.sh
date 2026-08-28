@@ -25,6 +25,14 @@ frontend_plane_supervision="${FRONTEND_PLANE_SUPERVISION:-false}"
 frontend_plane_splat_radius="${FRONTEND_PLANE_SPLAT_RADIUS:-2}"
 frontend_plane_min_confidence="${FRONTEND_PLANE_MIN_CONFIDENCE:-0.2}"
 frontend_plane_fallback_to_depth="${FRONTEND_PLANE_FALLBACK_TO_DEPTH:-false}"
+detail_spawn_enabled="${DETAIL_SPAWN_ENABLED:-false}"
+detail_spawn_top_k="${DETAIL_SPAWN_TOP_K:-512}"
+detail_spawn_pixel_stride="${DETAIL_SPAWN_PIXEL_STRIDE:-4}"
+detail_spawn_threshold="${DETAIL_SPAWN_THRESHOLD:-0.10}"
+detail_spawn_detail_power="${DETAIL_SPAWN_DETAIL_POWER:-1.0}"
+detail_spawn_alpha_power="${DETAIL_SPAWN_ALPHA_POWER:-1.0}"
+reliable_detail_weight="${RELIABLE_DETAIL_WEIGHT:-0.0}"
+reliable_detail_floor="${RELIABLE_DETAIL_FLOOR:-0.05}"
 gaussian_root="/root/autodl-tmp/catkin_gaussian/src/Gaussian-LIC"
 config_path="${gaussian_root}/config/r3live_p1.yaml"
 # The persistent mount can temporarily reject new directory entries despite
@@ -144,6 +152,14 @@ stdbuf -oL -eL "${gaussian_root}/../../devel/lib/gaussian_lic/gs_mapping" \
     _frontend_plane_splat_radius:="${frontend_plane_splat_radius}" \
     _frontend_plane_min_confidence:="${frontend_plane_min_confidence}" \
     _frontend_plane_fallback_to_depth:="${frontend_plane_fallback_to_depth}" \
+    _detail_spawn_enabled:="${detail_spawn_enabled}" \
+    _detail_spawn_top_k:="${detail_spawn_top_k}" \
+    _detail_spawn_pixel_stride:="${detail_spawn_pixel_stride}" \
+    _detail_spawn_threshold:="${detail_spawn_threshold}" \
+    _detail_spawn_detail_power:="${detail_spawn_detail_power}" \
+    _detail_spawn_alpha_power:="${detail_spawn_alpha_power}" \
+    _reliable_densification_detail_weight:="${reliable_detail_weight}" \
+    _reliable_densification_detail_floor:="${reliable_detail_floor}" \
     _evaluation_save_images:="${evaluation_save_images}" \
     >"${log_dir}/gaussian.log" 2>&1 &
 gaussian_pid=$!
@@ -214,6 +230,14 @@ frontend_plane_supervision=${frontend_plane_supervision}
 frontend_plane_splat_radius=${frontend_plane_splat_radius}
 frontend_plane_min_confidence=${frontend_plane_min_confidence}
 frontend_plane_fallback_to_depth=${frontend_plane_fallback_to_depth}
+detail_spawn_enabled=${detail_spawn_enabled}
+detail_spawn_top_k=${detail_spawn_top_k}
+detail_spawn_pixel_stride=${detail_spawn_pixel_stride}
+detail_spawn_threshold=${detail_spawn_threshold}
+detail_spawn_detail_power=${detail_spawn_detail_power}
+detail_spawn_alpha_power=${detail_spawn_alpha_power}
+reliable_densification_detail_weight=${reliable_detail_weight}
+reliable_densification_detail_floor=${reliable_detail_floor}
 EOF
 cp "${config_path}" "${result_dir}/r3live_p1.yaml"
 find "${result_dir}" -maxdepth 3 -type f | sort >"${result_dir}/file_manifest.txt"
@@ -230,3 +254,5 @@ echo "GEOMETRY_DEPTH=${geometry_optimize_depth}:${geometry_lambda_depth}"
 echo "GEOMETRY_NORMAL=${geometry_optimize_normal}:${geometry_lambda_normal}"
 echo "GEOMETRY_POINT_PLANE=${geometry_optimize_point_plane}:${geometry_lambda_point_plane}"
 echo "FRONTEND_PLANES=${frontend_plane_supervision}:radius=${frontend_plane_splat_radius}:confidence=${frontend_plane_min_confidence}"
+echo "DETAIL_SPAWN=${detail_spawn_enabled}:top_k=${detail_spawn_top_k}:stride=${detail_spawn_pixel_stride}:threshold=${detail_spawn_threshold}:detail_power=${detail_spawn_detail_power}:alpha_power=${detail_spawn_alpha_power}"
+echo "DETAIL_SPLIT=weight=${reliable_detail_weight}:floor=${reliable_detail_floor}"
