@@ -505,6 +505,25 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
               << ", dynamic_geometry_capacity="
               << (prm.dynamic_geometry_capacity ? "true" : "false")
               << ", random_seed=" << prm.random_seed << std::endl;
+    if (prm.lambda_depth < 0.0 || prm.lambda_normal < 0.0 ||
+        prm.lambda_point_plane < 0.0 ||
+        prm.geometry_depth_discontinuity_ratio < 0.0 ||
+        prm.point_plane_charbonnier_eps <= 0.0)
+    {
+        throw std::invalid_argument(
+            "Geometry loss weights/edge ratio must be non-negative and Charbonnier epsilon positive");
+    }
+    std::cout << "[Gaussian-LIC Geometry Loss] depth="
+              << (prm.optimize_depth ? "true" : "false")
+              << " (lambda=" << prm.lambda_depth << ")"
+              << ", normal=" << (prm.optimize_normal ? "true" : "false")
+              << " (lambda=" << prm.lambda_normal << ")"
+              << ", point_plane="
+              << (prm.optimize_point_plane ? "true" : "false")
+              << " (lambda=" << prm.lambda_point_plane << ")"
+              << ", edge_ratio=" << prm.geometry_depth_discontinuity_ratio
+              << ", charbonnier_eps=" << prm.point_plane_charbonnier_eps
+              << std::endl;
     torch::manual_seed(prm.random_seed);
     torch::cuda::manual_seed_all(prm.random_seed);
     if (!prm.semantic_bundle_path.empty())
@@ -1277,6 +1296,42 @@ int main(int argc, char** argv)
     bool dynamic_geometry_capacity = true;
     nh.param<bool>("dynamic_geometry_capacity", dynamic_geometry_capacity, true);
     config_node["dynamic_geometry_capacity"] = dynamic_geometry_capacity;
+    bool optimize_depth = config_node["optimize_depth"].as<bool>();
+    nh.param<bool>("optimize_depth", optimize_depth, optimize_depth);
+    config_node["optimize_depth"] = optimize_depth;
+    double lambda_depth = config_node["lambda_depth"].as<double>();
+    nh.param<double>("lambda_depth", lambda_depth, lambda_depth);
+    config_node["lambda_depth"] = lambda_depth;
+    bool optimize_normal = config_node["optimize_normal"]
+        ? config_node["optimize_normal"].as<bool>() : false;
+    nh.param<bool>("optimize_normal", optimize_normal, optimize_normal);
+    config_node["optimize_normal"] = optimize_normal;
+    double lambda_normal = config_node["lambda_normal"]
+        ? config_node["lambda_normal"].as<double>() : 0.0;
+    nh.param<double>("lambda_normal", lambda_normal, lambda_normal);
+    config_node["lambda_normal"] = lambda_normal;
+    bool optimize_point_plane = config_node["optimize_point_plane"]
+        ? config_node["optimize_point_plane"].as<bool>() : false;
+    nh.param<bool>("optimize_point_plane", optimize_point_plane, optimize_point_plane);
+    config_node["optimize_point_plane"] = optimize_point_plane;
+    double lambda_point_plane = config_node["lambda_point_plane"]
+        ? config_node["lambda_point_plane"].as<double>() : 0.0;
+    nh.param<double>("lambda_point_plane", lambda_point_plane, lambda_point_plane);
+    config_node["lambda_point_plane"] = lambda_point_plane;
+    double geometry_depth_discontinuity_ratio = config_node["geometry_depth_discontinuity_ratio"]
+        ? config_node["geometry_depth_discontinuity_ratio"].as<double>() : 0.05;
+    nh.param<double>(
+        "geometry_depth_discontinuity_ratio",
+        geometry_depth_discontinuity_ratio,
+        geometry_depth_discontinuity_ratio);
+    config_node["geometry_depth_discontinuity_ratio"] = geometry_depth_discontinuity_ratio;
+    double point_plane_charbonnier_eps = config_node["point_plane_charbonnier_eps"]
+        ? config_node["point_plane_charbonnier_eps"].as<double>() : 0.001;
+    nh.param<double>(
+        "point_plane_charbonnier_eps",
+        point_plane_charbonnier_eps,
+        point_plane_charbonnier_eps);
+    config_node["point_plane_charbonnier_eps"] = point_plane_charbonnier_eps;
     int random_seed = 20260725;
     nh.param<int>("random_seed", random_seed, 20260725);
     config_node["random_seed"] = random_seed;

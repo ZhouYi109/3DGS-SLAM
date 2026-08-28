@@ -76,6 +76,17 @@ def parse_run(log_root: Path, result_root: Path, run_id: str, input_frames: int)
     )
 
     wall = parse_wall_times(log_root / run_id / "wall_times.txt")
+    for key in (
+        "geometry_optimize_depth",
+        "geometry_lambda_depth",
+        "geometry_optimize_normal",
+        "geometry_lambda_normal",
+        "geometry_optimize_point_plane",
+        "geometry_lambda_point_plane",
+        "geometry_depth_discontinuity_ratio",
+        "geometry_point_plane_eps",
+    ):
+        row[key] = wall.get(key, "")
     row["completed"] = str(
         wall.get("bag_status") == "0"
         and wall.get("gaussian_status") == "0"
@@ -127,6 +138,10 @@ def main() -> None:
         "forward_s", "backward_s", "step_s", "cpu_to_gpu_s", "optimize_mean_ms",
         "optimize_p95_ms", "optimize_sum_s", "extend_mean_ms", "gaussians", "train_psnr",
         "train_ssim", "train_lpips", "novel_psnr", "novel_ssim", "novel_lpips",
+        "geometry_optimize_depth", "geometry_lambda_depth",
+        "geometry_optimize_normal", "geometry_lambda_normal",
+        "geometry_optimize_point_plane", "geometry_lambda_point_plane",
+        "geometry_depth_discontinuity_ratio", "geometry_point_plane_eps",
     ]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8", newline="") as handle:

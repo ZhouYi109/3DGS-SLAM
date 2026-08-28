@@ -152,6 +152,14 @@ public:
         lambda_dssim = node["lambda_dssim"].as<double>();
         optimize_depth = node["optimize_depth"].as<bool>();
         lambda_depth = node["lambda_depth"].as<double>();
+        optimize_normal = node["optimize_normal"] ? node["optimize_normal"].as<bool>() : false;
+        lambda_normal = node["lambda_normal"] ? node["lambda_normal"].as<double>() : 0.0;
+        optimize_point_plane = node["optimize_point_plane"] ? node["optimize_point_plane"].as<bool>() : false;
+        lambda_point_plane = node["lambda_point_plane"] ? node["lambda_point_plane"].as<double>() : 0.0;
+        geometry_depth_discontinuity_ratio = node["geometry_depth_discontinuity_ratio"]
+            ? node["geometry_depth_discontinuity_ratio"].as<double>() : 0.05;
+        point_plane_charbonnier_eps = node["point_plane_charbonnier_eps"]
+            ? node["point_plane_charbonnier_eps"].as<double>() : 0.001;
         iteration_decay = node["iteration_decay"].as<bool>();
         dynamic_appearance_weight = node["dynamic_appearance_weight"] ? node["dynamic_appearance_weight"].as<bool>() : true;
         dynamic_geometry_capacity = node["dynamic_geometry_capacity"] ? node["dynamic_geometry_capacity"].as<bool>() : true;
@@ -257,6 +265,12 @@ public:
     double lambda_dssim;
     bool optimize_depth;
     double lambda_depth;
+    bool optimize_normal;
+    double lambda_normal;
+    bool optimize_point_plane;
+    double lambda_point_plane;
+    double geometry_depth_discontinuity_ratio;
+    double point_plane_charbonnier_eps;
     bool iteration_decay;
     bool dynamic_appearance_weight;
     bool dynamic_geometry_capacity;

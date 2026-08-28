@@ -49,6 +49,93 @@ float clamp_weight(float value, float min_value = 0.2f, float max_value = 1.0f)
     return std::max(min_value, std::min(max_value, value));
 }
 
+struct DepthSurface
+{
+    torch::Tensor points;
+    torch::Tensor normals;
+    torch::Tensor valid;
+};
+
+DepthSurface depthToSurface(
+    const torch::Tensor& depth_input,
+    float fx, float fy, float cx, float cy,
+    float discontinuity_ratio)
+{
+    auto depth = depth_input.squeeze();
+    if (depth.dim() != 2 || depth.size(0) < 3 || depth.size(1) < 3)
+    {
+        throw std::invalid_argument("depthToSurface expects an HxW depth map with H,W >= 3");
+    }
+
+    const int64_t height = depth.size(0);
+    const int64_t width = depth.size(1);
+    auto finite = torch::isfinite(depth);
+    auto positive = depth > 0.0f;
+    auto depth_valid = finite & positive;
+    auto safe_depth = torch::where(depth_valid, depth, torch::zeros_like(depth));
+    auto options = safe_depth.options();
+    auto u = torch::arange(width, options).view({1, width}).expand({height, width});
+    auto v = torch::arange(height, options).view({height, 1}).expand({height, width});
+    auto x = (u - cx) * safe_depth / fx;
+    auto y = (v - cy) * safe_depth / fy;
+    auto points = torch::stack({x, y, safe_depth}, -1);
+
+    using torch::indexing::Slice;
+    auto center = safe_depth.index({Slice(1, -1), Slice(1, -1)});
+    auto left_depth = safe_depth.index({Slice(1, -1), Slice(0, -2)});
+    auto right_depth = safe_depth.index({Slice(1, -1), Slice(2, width)});
+    auto up_depth = safe_depth.index({Slice(0, -2), Slice(1, -1)});
+    auto down_depth = safe_depth.index({Slice(2, height), Slice(1, -1)});
+    auto valid = depth_valid.index({Slice(1, -1), Slice(1, -1)})
+        & depth_valid.index({Slice(1, -1), Slice(0, -2)})
+        & depth_valid.index({Slice(1, -1), Slice(2, width)})
+        & depth_valid.index({Slice(0, -2), Slice(1, -1)})
+        & depth_valid.index({Slice(2, height), Slice(1, -1)});
+
+    const float ratio = std::max(0.0f, discontinuity_ratio);
+    auto edge_limit = ratio * center.clamp_min(1e-3f);
+    valid = valid & ((left_depth - center).abs() <= edge_limit);
+    valid = valid & ((right_depth - center).abs() <= edge_limit);
+    valid = valid & ((up_depth - center).abs() <= edge_limit);
+    valid = valid & ((down_depth - center).abs() <= edge_limit);
+
+    auto horizontal = points.index({Slice(1, -1), Slice(2, width), Slice()})
+        - points.index({Slice(1, -1), Slice(0, -2), Slice()});
+    auto vertical = points.index({Slice(2, height), Slice(1, -1), Slice()})
+        - points.index({Slice(0, -2), Slice(1, -1), Slice()});
+    auto normals = torch::cross(horizontal, vertical, 2);
+    normals = normals / normals.norm(2, 2, true).clamp_min(1e-6f);
+    auto center_points = points.index({Slice(1, -1), Slice(1, -1), Slice()});
+    return {center_points, normals, valid};
+}
+
+std::pair<torch::Tensor, torch::Tensor> depthGeometryLosses(
+    const torch::Tensor& rendered_depth,
+    const torch::Tensor& reference_depth,
+    float fx, float fy, float cx, float cy,
+    float discontinuity_ratio,
+    float charbonnier_eps)
+{
+    auto rendered = depthToSurface(
+        rendered_depth, fx, fy, cx, cy, discontinuity_ratio);
+    auto reference = depthToSurface(
+        reference_depth, fx, fy, cx, cy, discontinuity_ratio);
+    auto valid = rendered.valid & reference.valid;
+    auto weight = valid.to(rendered.normals.scalar_type());
+    auto denominator = weight.sum().clamp_min(1.0f);
+
+    auto cosine = (rendered.normals * reference.normals).sum(2).abs().clamp(0.0f, 1.0f);
+    auto normal_loss = ((1.0f - cosine) * weight).sum() / denominator;
+
+    auto plane_residual = (
+        (rendered.points - reference.points) * reference.normals
+    ).sum(2);
+    const float epsilon = std::max(1e-6f, charbonnier_eps);
+    auto robust_plane = torch::sqrt(plane_residual.square() + epsilon * epsilon) - epsilon;
+    auto point_plane_loss = (robust_plane * weight).sum() / denominator;
+    return {normal_loss, point_plane_loss};
+}
+
 struct NpyInfo
 {
     std::vector<int64_t> shape;
@@ -1414,6 +1501,12 @@ GaussianModel::GaussianModel(const Params& prm)
     lambda_dssim_ = prm.lambda_dssim;
     optimize_depth_ = prm.optimize_depth;
     lambda_depth_ = prm.lambda_depth;
+    optimize_normal_ = prm.optimize_normal;
+    lambda_normal_ = prm.lambda_normal;
+    optimize_point_plane_ = prm.optimize_point_plane;
+    lambda_point_plane_ = prm.lambda_point_plane;
+    geometry_depth_discontinuity_ratio_ = prm.geometry_depth_discontinuity_ratio;
+    point_plane_charbonnier_eps_ = prm.point_plane_charbonnier_eps;
     iteration_decay_ = prm.iteration_decay;
     dynamic_appearance_weight_ = prm.dynamic_appearance_weight;
     dynamic_geometry_capacity_ = prm.dynamic_geometry_capacity;
@@ -4193,9 +4286,13 @@ double optimize(
         auto render_pkg = render(viewpoint_cam, pc, bg, pc->apply_exposure_);
         auto rendered_image = std::get<0>(render_pkg);
         auto rendered_depth = std::get<1>(render_pkg);
-        auto mask = (gt_depth > 0) & (rendered_depth > 0);
+        auto mask = torch::isfinite(gt_depth) & torch::isfinite(rendered_depth)
+            & (gt_depth > 0) & (rendered_depth > 0);
         auto Ll1 = loss_utils::l1_loss(rendered_image, gt_image);
-        auto Ll1_depth = torch::abs(rendered_depth.masked_select(mask) - gt_depth.masked_select(mask)).mean();
+        auto depth_mask = mask.to(rendered_depth.scalar_type());
+        auto depth_residual = torch::where(
+            mask, torch::abs(rendered_depth - gt_depth), torch::zeros_like(rendered_depth));
+        auto Ll1_depth = depth_residual.sum() / depth_mask.sum().clamp_min(1.0f);
         float lambda_dssim = pc->lambda_dssim_;
         float lambda_depth = pc->lambda_depth_;
         float rgb_weight = clamp_weight(viewpoint_cam->rgb_loss_weight_);
@@ -4213,6 +4310,24 @@ double optimize(
         auto appearance_loss = (1.0 - lambda_dssim) * Ll1 + lambda_dssim * (1.0 - ssim_value);
         auto loss = appearance_weight * appearance_loss;
         if (pc->optimize_depth_) loss += depth_supervision_weight * lambda_depth * Ll1_depth;
+        if (pc->optimize_normal_ || pc->optimize_point_plane_)
+        {
+            auto geometry_losses = depthGeometryLosses(
+                rendered_depth,
+                gt_depth,
+                viewpoint_cam->fx_, viewpoint_cam->fy_,
+                viewpoint_cam->cx_, viewpoint_cam->cy_,
+                static_cast<float>(pc->geometry_depth_discontinuity_ratio_),
+                static_cast<float>(pc->point_plane_charbonnier_eps_));
+            if (pc->optimize_normal_)
+            {
+                loss += depth_supervision_weight * pc->lambda_normal_ * geometry_losses.first;
+            }
+            if (pc->optimize_point_plane_)
+            {
+                loss += depth_supervision_weight * pc->lambda_point_plane_ * geometry_losses.second;
+            }
+        }
         torch::cuda::synchronize();
         pc->t_end_ = std::chrono::steady_clock::now();
         pc->t_forward_ += std::chrono::duration_cast<std::chrono::duration<double>>(pc->t_end_ - pc->t_start_).count();

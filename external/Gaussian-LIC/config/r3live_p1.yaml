@@ -78,6 +78,14 @@ rotation_lr: 0.001
 lambda_dssim: 0.2
 optimize_depth: false
 lambda_depth: 0.0
+# A-F geometry-loss ablations. All geometry terms are disabled in the frozen A baseline.
+# C/D/E/F use normals derived from metric reference/rendered depth with edge masking.
+optimize_normal: false
+lambda_normal: 0.0
+optimize_point_plane: false
+lambda_point_plane: 0.0
+geometry_depth_discontinuity_ratio: 0.05
+point_plane_charbonnier_eps: 0.001
 iteration_decay: false
 dynamic_appearance_weight: true
 dynamic_geometry_capacity: true

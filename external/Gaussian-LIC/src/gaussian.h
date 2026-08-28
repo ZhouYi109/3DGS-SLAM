@@ -293,6 +293,12 @@ public:
     double lambda_dssim_;
     bool optimize_depth_;
     double lambda_depth_;
+    bool optimize_normal_;
+    double lambda_normal_;
+    bool optimize_point_plane_;
+    double lambda_point_plane_;
+    double geometry_depth_discontinuity_ratio_;
+    double point_plane_charbonnier_eps_;
     bool iteration_decay_;
     bool dynamic_appearance_weight_;
     bool dynamic_geometry_capacity_;
