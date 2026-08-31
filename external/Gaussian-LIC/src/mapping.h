@@ -34,7 +34,6 @@
 #include <ros/package.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/PointCloud2.h>
-#include <sensor_msgs/point_cloud2_iterator.h>
 #include <std_msgs/Header.h>
 #include <tf/tf.h>
 #include <tf/transform_broadcaster.h>
@@ -172,22 +171,6 @@ public:
             ? node["geometry_depth_discontinuity_ratio"].as<double>() : 0.05;
         point_plane_charbonnier_eps = node["point_plane_charbonnier_eps"]
             ? node["point_plane_charbonnier_eps"].as<double>() : 0.001;
-        point_plane_depth_gate_ratio = node["point_plane_depth_gate_ratio"]
-            ? node["point_plane_depth_gate_ratio"].as<double>() : 0.10;
-        point_plane_depth_gate_min = node["point_plane_depth_gate_min"]
-            ? node["point_plane_depth_gate_min"].as<double>() : 0.20;
-        frontend_plane_supervision = node["frontend_plane_supervision"]
-            ? node["frontend_plane_supervision"].as<bool>() : false;
-        frontend_plane_topic = node["frontend_plane_topic"]
-            ? node["frontend_plane_topic"].as<std::string>() : "/planes_for_gs";
-        frontend_plane_sync_tolerance_sec = node["frontend_plane_sync_tolerance_sec"]
-            ? node["frontend_plane_sync_tolerance_sec"].as<double>() : 0.01;
-        frontend_plane_splat_radius = node["frontend_plane_splat_radius"]
-            ? node["frontend_plane_splat_radius"].as<int>() : 2;
-        frontend_plane_min_confidence = node["frontend_plane_min_confidence"]
-            ? node["frontend_plane_min_confidence"].as<double>() : 0.2;
-        frontend_plane_fallback_to_depth = node["frontend_plane_fallback_to_depth"]
-            ? node["frontend_plane_fallback_to_depth"].as<bool>() : false;
         iteration_decay = node["iteration_decay"].as<bool>();
         dynamic_appearance_weight = node["dynamic_appearance_weight"] ? node["dynamic_appearance_weight"].as<bool>() : true;
         dynamic_geometry_capacity = node["dynamic_geometry_capacity"] ? node["dynamic_geometry_capacity"].as<bool>() : true;
@@ -310,14 +293,6 @@ public:
     double lambda_point_plane;
     double geometry_depth_discontinuity_ratio;
     double point_plane_charbonnier_eps;
-    double point_plane_depth_gate_ratio;
-    double point_plane_depth_gate_min;
-    bool frontend_plane_supervision;
-    std::string frontend_plane_topic;
-    double frontend_plane_sync_tolerance_sec;
-    int frontend_plane_splat_radius;
-    double frontend_plane_min_confidence;
-    bool frontend_plane_fallback_to_depth;
     bool iteration_decay;
     bool dynamic_appearance_weight;
     bool dynamic_geometry_capacity;
@@ -332,7 +307,6 @@ public:
 struct Frame 
 {
     sensor_msgs::PointCloud2ConstPtr point_msg;
-    sensor_msgs::PointCloud2ConstPtr plane_msg;
     geometry_msgs::PoseStampedConstPtr pose_msg;
     geometry_msgs::QuaternionStampedConstPtr weight_msg;
     sensor_msgs::ImageConstPtr image_msg;

@@ -764,11 +764,6 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
           single_ptpl.normal_ = plane.normal_;
           single_ptpl.center_ = plane.center_;
           single_ptpl.d_ = plane.d_;
-          single_ptpl.min_eigen_value_ = plane.min_eigen_value_;
-          single_ptpl.mid_eigen_value_ = plane.mid_eigen_value_;
-          single_ptpl.max_eigen_value_ = plane.max_eigen_value_;
-          single_ptpl.radius_ = plane.radius_;
-          single_ptpl.plane_id_ = plane.id_;
           single_ptpl.layer_ = current_layer;
           single_ptpl.dis_to_plane_ = plane.normal_(0) * p_w(0) + plane.normal_(1) * p_w(1) + plane.normal_(2) * p_w(2) + plane.d_;
         }

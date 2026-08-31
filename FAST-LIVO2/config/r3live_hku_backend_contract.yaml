@@ -75,10 +75,6 @@ publish:
   pub_scan_num: 1
   blind_rgb_points: 0.0
   gs_output_en: true
-  gs_plane_output_en: true
-  gs_plane_point_skip: 1
-  gs_plane_max_samples: 5000
-  gs_plane_min_confidence: 0.2
   gs_depth_history: 5
   gs_point_skip: 10
   gs_publish_delay_frames: 2

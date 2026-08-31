@@ -64,11 +64,6 @@ typedef struct PointToPlane
   int layer_;
   double d_;
   double eigen_value_;
-  double min_eigen_value_;
-  double mid_eigen_value_;
-  double max_eigen_value_;
-  double radius_;
-  int plane_id_;
   bool is_valid_;
   float dis_to_plane_;
 } PointToPlane;

@@ -193,57 +193,6 @@ std::pair<torch::Tensor, torch::Tensor> depthGeometryLosses(
     return {normal_loss, point_plane_loss};
 }
 
-std::pair<torch::Tensor, torch::Tensor> frontendPlaneGeometryLosses(
-    const torch::Tensor& rendered_depth,
-    const torch::Tensor& reference_normals_chw,
-    const torch::Tensor& reference_centers_chw,
-    const torch::Tensor& reference_confidence,
-    float fx, float fy, float cx, float cy,
-    float discontinuity_ratio,
-    float charbonnier_eps,
-    float depth_gate_ratio,
-    float depth_gate_min)
-{
-    auto rendered = depthToSurface(
-        rendered_depth, fx, fy, cx, cy, discontinuity_ratio);
-    using torch::indexing::Slice;
-    auto normals = reference_normals_chw.index(
-        {Slice(), Slice(1, -1), Slice(1, -1)}).permute({1, 2, 0});
-    auto centers = reference_centers_chw.index(
-        {Slice(), Slice(1, -1), Slice(1, -1)}).permute({1, 2, 0});
-    auto confidence = reference_confidence.squeeze().index(
-        {Slice(1, -1), Slice(1, -1)}).to(rendered.normals.scalar_type());
-    auto plane_valid = torch::isfinite(normals).all(2)
-        & torch::isfinite(centers).all(2)
-        & torch::isfinite(confidence) & (confidence > 0.0f);
-    auto normal_valid = rendered.valid & plane_valid;
-    auto normal_weight = torch::where(
-        normal_valid, confidence, torch::zeros_like(confidence));
-    auto normal_denominator = normal_weight.sum().clamp_min(1.0f);
-
-    normals = normals / normals.norm(2, 2, true).clamp_min(1e-6f);
-    auto cosine = (rendered.normals * normals).sum(2).abs().clamp(0.0f, 1.0f);
-    auto normal_loss = ((1.0f - cosine) * normal_weight).sum() / normal_denominator;
-    // A projected LiDAR plane is not necessarily the surface rendered at the
-    // same pixel (occlusion boundaries and foreground/background overlap).
-    // Apply point-to-plane supervision only to depth-consistent associations.
-    auto reference_z = centers.index({Slice(), Slice(), 2}).abs();
-    auto rendered_z = rendered.points.index({Slice(), Slice(), 2});
-    auto gate = torch::maximum(
-        torch::full_like(reference_z, std::max(0.0f, depth_gate_min)),
-        reference_z * std::max(0.0f, depth_gate_ratio));
-    auto point_plane_valid = normal_valid & ((rendered_z - reference_z).abs() <= gate);
-    auto point_plane_weight = torch::where(
-        point_plane_valid, confidence, torch::zeros_like(confidence));
-    auto point_plane_denominator = point_plane_weight.sum().clamp_min(1.0f);
-    auto plane_residual = ((rendered.points - centers) * normals).sum(2);
-    const float epsilon = std::max(1e-6f, charbonnier_eps);
-    auto robust_plane = torch::sqrt(plane_residual.square() + epsilon * epsilon) - epsilon;
-    auto point_plane_loss =
-        (robust_plane * point_plane_weight).sum() / point_plane_denominator;
-    return {normal_loss, point_plane_loss};
-}
-
 struct NpyInfo
 {
     std::vector<int64_t> shape;
@@ -861,104 +810,6 @@ std::vector<PixelPosition> selectFromDepthCompletion(const cv::Mat& depth_A, con
     return result;
 }
 
-namespace
-{
-struct FrontendPlaneRaster
-{
-    cv::Mat normals;
-    cv::Mat centers;
-    cv::Mat confidence;
-    int sample_count = 0;
-    int valid_pixels = 0;
-};
-
-bool pointCloudHasField(const sensor_msgs::PointCloud2& message, const std::string& name)
-{
-    return std::any_of(
-        message.fields.begin(), message.fields.end(),
-        [&name](const sensor_msgs::PointField& field) { return field.name == name; });
-}
-
-FrontendPlaneRaster rasterizeFrontendPlanes(
-    const sensor_msgs::PointCloud2ConstPtr& message,
-    const Eigen::Matrix3d& R_wc, const Eigen::Vector3d& t_wc,
-    int width, int height, double fx, double fy, double cx, double cy,
-    double max_depth, int splat_radius, float min_confidence)
-{
-    FrontendPlaneRaster output;
-    output.normals = cv::Mat::zeros(height, width, CV_32FC3);
-    output.centers = cv::Mat::zeros(height, width, CV_32FC3);
-    output.confidence = cv::Mat::zeros(height, width, CV_32FC1);
-    if (!message || message->width * message->height == 0) return output;
-
-    const std::array<std::string, 10> required = {
-        "x", "y", "z", "normal_x", "normal_y", "normal_z",
-        "center_x", "center_y", "center_z", "confidence"};
-    for (const auto& field : required)
-    {
-        if (!pointCloudHasField(*message, field))
-        {
-            throw std::runtime_error(
-                "Frontend plane message is missing required field: " + field);
-        }
-    }
-
-    cv::Mat z_buffer(height, width, CV_32FC1,
-                     cv::Scalar(std::numeric_limits<float>::infinity()));
-    sensor_msgs::PointCloud2ConstIterator<float> x(*message, "x"), y(*message, "y"), z(*message, "z");
-    sensor_msgs::PointCloud2ConstIterator<float> nx(*message, "normal_x"), ny(*message, "normal_y"), nz(*message, "normal_z");
-    sensor_msgs::PointCloud2ConstIterator<float> center_x(*message, "center_x"), center_y(*message, "center_y"), center_z(*message, "center_z");
-    sensor_msgs::PointCloud2ConstIterator<float> confidence(*message, "confidence");
-    const Eigen::Matrix3d R_cw = R_wc.transpose();
-    const Eigen::Vector3d t_cw = -R_cw * t_wc;
-    const int radius = std::max(0, splat_radius);
-
-    for (; x != x.end(); ++x, ++y, ++z, ++nx, ++ny, ++nz,
-         ++center_x, ++center_y, ++center_z, ++confidence)
-    {
-        if (!std::isfinite(*confidence) || *confidence < min_confidence) continue;
-        const Eigen::Vector3d point_w(*x, *y, *z);
-        const Eigen::Vector3d center_w(*center_x, *center_y, *center_z);
-        Eigen::Vector3d normal_w(*nx, *ny, *nz);
-        if (!point_w.allFinite() || !center_w.allFinite() || !normal_w.allFinite() ||
-            normal_w.squaredNorm() < 1e-12) continue;
-        normal_w.normalize();
-        const Eigen::Vector3d point_c = R_cw * point_w + t_cw;
-        const Eigen::Vector3d center_c = R_cw * center_w + t_cw;
-        Eigen::Vector3d normal_c = R_cw * normal_w;
-        if (point_c.z() <= 0.0 || point_c.z() > max_depth) continue;
-        if (normal_c.dot(center_c) > 0.0) normal_c = -normal_c;
-        const int u = static_cast<int>(std::lround(fx * point_c.x() / point_c.z() + cx));
-        const int v = static_cast<int>(std::lround(fy * point_c.y() / point_c.z() + cy));
-        if (u < 0 || u >= width || v < 0 || v >= height) continue;
-        output.sample_count++;
-
-        for (int dv = -radius; dv <= radius; ++dv)
-        {
-            for (int du = -radius; du <= radius; ++du)
-            {
-                if (du * du + dv * dv > radius * radius) continue;
-                const int px = u + du;
-                const int py = v + dv;
-                if (px < 0 || px >= width || py < 0 || py >= height) continue;
-                float& stored_depth = z_buffer.at<float>(py, px);
-                if (point_c.z() >= stored_depth) continue;
-                stored_depth = static_cast<float>(point_c.z());
-                output.normals.at<cv::Vec3f>(py, px) = cv::Vec3f(
-                    static_cast<float>(normal_c.x()), static_cast<float>(normal_c.y()),
-                    static_cast<float>(normal_c.z()));
-                output.centers.at<cv::Vec3f>(py, px) = cv::Vec3f(
-                    static_cast<float>(center_c.x()), static_cast<float>(center_c.y()),
-                    static_cast<float>(center_c.z()));
-                output.confidence.at<float>(py, px) = *confidence;
-            }
-        }
-    }
-    output.valid_pixels = cv::countNonZero(output.confidence > 0.0f);
-    return output;
-}
-}
-
 void Dataset::addFrame(Frame& cur_frame)
 {
     /// image
@@ -1400,14 +1251,6 @@ void Dataset::addFrame(Frame& cur_frame)
     tf::pointMsgToEigen(cur_frame.pose_msg->pose.position, t_wc);
     R_wc_.push_back(q_wc.toRotationMatrix());
     t_wc_.push_back(t_wc);
-    FrontendPlaneRaster plane_raster;
-    if (frontend_plane_supervision_)
-    {
-        plane_raster = rasterizeFrontendPlanes(
-            cur_frame.plane_msg, q_wc.toRotationMatrix(), t_wc,
-            width, height, fx_, fy_, cx_, cy_, max_depth_,
-            frontend_plane_splat_radius_, frontend_plane_min_confidence_);
-    }
     float rgb_weight = 1.0f, depth_weight = 1.0f, geometry_weight = 1.0f, pose_weight = 1.0f;
     if (cur_frame.weight_msg)
     {
@@ -1591,14 +1434,6 @@ void Dataset::addFrame(Frame& cur_frame)
 
         cam->original_image_ = tensor_utils::cvMat2TorchTensor_Float32(image_rgb, torch::kCPU, true);
         cam->original_depth_ = tensor_utils::cvMat2TorchTensor_Float32(depth_map, torch::kCPU, true);
-        if (frontend_plane_supervision_)
-        {
-            cam->frontend_plane_normal_ = tensor_utils::cvMat2TorchTensor_Float32(plane_raster.normals, torch::kCPU, true);
-            cam->frontend_plane_center_ = tensor_utils::cvMat2TorchTensor_Float32(plane_raster.centers, torch::kCPU, true);
-            cam->frontend_plane_confidence_ = tensor_utils::cvMat2TorchTensor_Float32(plane_raster.confidence, torch::kCPU, true);
-            cam->frontend_plane_sample_count_ = plane_raster.sample_count;
-            cam->frontend_plane_valid_pixels_ = plane_raster.valid_pixels;
-        }
         
         std::stringstream ss;
         ss << std::setw(4) << std::setfill('0') << all_frame_num_;
@@ -1621,14 +1456,6 @@ void Dataset::addFrame(Frame& cur_frame)
 
         cam->original_image_ = tensor_utils::cvMat2TorchTensor_Float32(image_rgb, torch::kCPU);
         cam->original_depth_ = tensor_utils::cvMat2TorchTensor_Float32(depth_map, torch::kCPU);
-        if (frontend_plane_supervision_)
-        {
-            cam->frontend_plane_normal_ = tensor_utils::cvMat2TorchTensor_Float32(plane_raster.normals, torch::kCPU);
-            cam->frontend_plane_center_ = tensor_utils::cvMat2TorchTensor_Float32(plane_raster.centers, torch::kCPU);
-            cam->frontend_plane_confidence_ = tensor_utils::cvMat2TorchTensor_Float32(plane_raster.confidence, torch::kCPU);
-            cam->frontend_plane_sample_count_ = plane_raster.sample_count;
-            cam->frontend_plane_valid_pixels_ = plane_raster.valid_pixels;
-        }
 
         std::stringstream ss;
         ss << std::setw(4) << std::setfill('0') << all_frame_num_;
@@ -1735,12 +1562,8 @@ GaussianModel::GaussianModel(const Params& prm)
     lambda_normal_ = prm.lambda_normal;
     optimize_point_plane_ = prm.optimize_point_plane;
     lambda_point_plane_ = prm.lambda_point_plane;
-    frontend_plane_supervision_ = prm.frontend_plane_supervision;
-    frontend_plane_fallback_to_depth_ = prm.frontend_plane_fallback_to_depth;
     geometry_depth_discontinuity_ratio_ = prm.geometry_depth_discontinuity_ratio;
     point_plane_charbonnier_eps_ = prm.point_plane_charbonnier_eps;
-    point_plane_depth_gate_ratio_ = prm.point_plane_depth_gate_ratio;
-    point_plane_depth_gate_min_ = prm.point_plane_depth_gate_min;
     iteration_decay_ = prm.iteration_decay;
     dynamic_appearance_weight_ = prm.dynamic_appearance_weight;
     dynamic_geometry_capacity_ = prm.dynamic_geometry_capacity;
@@ -4719,42 +4542,13 @@ double optimize(
         if (pc->optimize_depth_) loss += depth_supervision_weight * lambda_depth * Ll1_depth;
         if (pc->optimize_normal_ || pc->optimize_point_plane_)
         {
-            std::pair<torch::Tensor, torch::Tensor> geometry_losses;
-            const bool has_frontend_planes = pc->frontend_plane_supervision_ &&
-                viewpoint_cam->frontend_plane_valid_pixels_ > 0 &&
-                viewpoint_cam->frontend_plane_normal_.defined() &&
-                viewpoint_cam->frontend_plane_center_.defined() &&
-                viewpoint_cam->frontend_plane_confidence_.defined();
-            if (has_frontend_planes)
-            {
-                geometry_losses = frontendPlaneGeometryLosses(
-                    rendered_depth,
-                    viewpoint_cam->frontend_plane_normal_.to(torch::kCUDA, true),
-                    viewpoint_cam->frontend_plane_center_.to(torch::kCUDA, true),
-                    viewpoint_cam->frontend_plane_confidence_.to(torch::kCUDA, true),
-                    viewpoint_cam->fx_, viewpoint_cam->fy_,
-                    viewpoint_cam->cx_, viewpoint_cam->cy_,
-                    static_cast<float>(pc->geometry_depth_discontinuity_ratio_),
-                    static_cast<float>(pc->point_plane_charbonnier_eps_),
-                    static_cast<float>(pc->point_plane_depth_gate_ratio_),
-                    static_cast<float>(pc->point_plane_depth_gate_min_));
-            }
-            else if (!pc->frontend_plane_supervision_ ||
-                     pc->frontend_plane_fallback_to_depth_)
-            {
-                geometry_losses = depthGeometryLosses(
-                    rendered_depth,
-                    gt_depth,
-                    viewpoint_cam->fx_, viewpoint_cam->fy_,
-                    viewpoint_cam->cx_, viewpoint_cam->cy_,
-                    static_cast<float>(pc->geometry_depth_discontinuity_ratio_),
-                    static_cast<float>(pc->point_plane_charbonnier_eps_));
-            }
-            else
-            {
-                auto zero = rendered_depth.sum() * 0.0f;
-                geometry_losses = {zero, zero};
-            }
+            auto geometry_losses = depthGeometryLosses(
+                rendered_depth,
+                gt_depth,
+                viewpoint_cam->fx_, viewpoint_cam->fy_,
+                viewpoint_cam->cx_, viewpoint_cam->cy_,
+                static_cast<float>(pc->geometry_depth_discontinuity_ratio_),
+                static_cast<float>(pc->point_plane_charbonnier_eps_));
             if (pc->optimize_normal_)
             {
                 loss += depth_supervision_weight * pc->lambda_normal_ * geometry_losses.first;

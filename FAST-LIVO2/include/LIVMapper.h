@@ -17,7 +17,6 @@ which is included as part of this source code package.
 #include "vio.h"
 #include "preprocess.h"
 #include <cv_bridge/cv_bridge.h>
-#include <cstdint>
 #include <geometry_msgs/QuaternionStamped.h>
 #include <image_transport/image_transport.h>
 #include <limits>
@@ -25,27 +24,12 @@ which is included as part of this source code package.
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
 #include <sensor_msgs/Image.h>
-#include <sensor_msgs/PointCloud2.h>
 #include <std_msgs/Float32.h>
 #include <vikit/camera_loader.h>
 
 class LIVMapper
 {
 public:
-  struct GSPlaneSample
-  {
-    Eigen::Vector3f point_w = Eigen::Vector3f::Zero();
-    Eigen::Vector3f center_w = Eigen::Vector3f::Zero();
-    Eigen::Vector3f normal_w = Eigen::Vector3f::Zero();
-    float plane_d = 0.0f;
-    float confidence = 0.0f;
-    float radius = 0.0f;
-    float eigen_min = 0.0f;
-    float eigen_mid = 0.0f;
-    float eigen_max = 0.0f;
-    uint32_t plane_id = 0;
-  };
-
   struct GSPendingFrame
   {
     double timestamp = 0.0;
@@ -53,7 +37,6 @@ public:
     Eigen::Vector3d t_wc = Eigen::Vector3d::Zero();
     cv::Mat image_bgr;
     PointCloudXYZRGB::Ptr cloud;
-    std::vector<GSPlaneSample> planes;
     double visual_score = 1.0;
     double lidar_score = 1.0;
     double fused_score = 1.0;
@@ -116,16 +99,11 @@ public:
   cv::Mat prepare_3dgs_image(VIOManagerPtr vio_manager) const;
   PointCloudXYZRGB::Ptr build_3dgs_cloud(const Eigen::Quaterniond &q_wc, const Eigen::Vector3d &t_wc,
                                         const cv::Mat &image_bgr) const;
-  std::vector<GSPlaneSample> build_3dgs_plane_submap(const Eigen::Quaterniond &q_wc,
-                                                     const Eigen::Vector3d &t_wc) const;
-  sensor_msgs::PointCloud2 build_3dgs_plane_message(const std::vector<GSPlaneSample> &planes,
-                                                    const std_msgs::Header &header) const;
   cv::Mat build_3dgs_depth(VIOManagerPtr vio_manager) const;
   cv::Mat build_3dgs_depth_from_clouds(const Eigen::Quaterniond &q_wc, const Eigen::Vector3d &t_wc,
                                        const std::vector<PointCloudXYZRGB::Ptr> &clouds) const;
   bool get_camera_pose_world(VIOManagerPtr vio_manager, Eigen::Quaterniond &q_wc, Eigen::Vector3d &t_wc) const;
-  void log_3dgs_packet(double timestamp, const Eigen::Quaterniond &q_wc, const Eigen::Vector3d &t_wc,
-                       size_t point_count, size_t plane_count,
+  void log_3dgs_packet(double timestamp, const Eigen::Quaterniond &q_wc, const Eigen::Vector3d &t_wc, size_t point_count,
                        double visual_score, double lidar_score, double fused_score, double imu_score,
                        double semantic_risk_visual, double semantic_risk_lidar);
   static double clamp01(double value);
@@ -179,7 +157,6 @@ public:
 
   bool lidar_map_inited = false, pcd_save_en = false, img_save_en = false, pub_effect_point_en = false, pose_output_en = false, ros_driver_fix_en = false, hilti_en = false;
   bool gs_output_en = true;
-  bool gs_plane_output_en_ = true;
   bool gs_rectify_image_ = false;
   bool gs_adapter_ready_ = false;
   bool gs_contract_logged_ = false;
@@ -188,8 +165,6 @@ public:
   int gs_depth_history = 5;
   int gs_point_skip = 10;
   int gs_publish_delay_frames = 2;
-  int gs_plane_point_skip_ = 1;
-  int gs_plane_max_samples_ = 5000;
   int gs_image_width_ = 0;
   int gs_image_height_ = 0;
   double gs_fx_ = -1.0;
@@ -200,7 +175,6 @@ public:
   double gs_source_fy_ = -1.0;
   double gs_source_cx_ = -1.0;
   double gs_source_cy_ = -1.0;
-  double gs_plane_min_confidence_ = 0.2;
 
   StatesGroup imu_propagate, latest_ekf_state;
 
@@ -298,7 +272,6 @@ public:
   ros::Publisher mavros_pose_publisher;
   ros::Publisher pubGSPose;
   ros::Publisher pubGSPoints;
-  ros::Publisher pubGSPlanes;
   ros::Publisher pubGSWeights;
   ros::Timer imu_prop_timer;
 

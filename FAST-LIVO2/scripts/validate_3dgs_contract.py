@@ -30,9 +30,8 @@ def main():
     depth_sub = message_filters.Subscriber("/depth_for_gs", Image)
     pose_sub = message_filters.Subscriber("/pose_for_gs", PoseStamped)
     points_sub = message_filters.Subscriber("/points_for_gs", PointCloud2)
-    planes_sub = message_filters.Subscriber("/planes_for_gs", PointCloud2)
     synchronizer = message_filters.ApproximateTimeSynchronizer(
-        [image_sub, depth_sub, pose_sub, points_sub, planes_sub], queue_size=100, slop=0.01
+        [image_sub, depth_sub, pose_sub, points_sub], queue_size=100, slop=0.01
     )
 
     def finish(payload):
@@ -41,15 +40,12 @@ def main():
         result.update(payload)
         rospy.signal_shutdown(payload["status"])
 
-    def callback(image_msg, depth_msg, pose_msg, points_msg, planes_msg):
-        if planes_msg.width * planes_msg.height == 0:
-            return
+    def callback(image_msg, depth_msg, pose_msg, points_msg):
         stamps = [
             image_msg.header.stamp.to_sec(),
             depth_msg.header.stamp.to_sec(),
             pose_msg.header.stamp.to_sec(),
             points_msg.header.stamp.to_sec(),
-            planes_msg.header.stamp.to_sec(),
         ]
         depth_dtype = np.dtype(">f4" if depth_msg.is_bigendian else "<f4")
         depth = np.frombuffer(depth_msg.data, dtype=depth_dtype)
@@ -62,12 +58,6 @@ def main():
             + quaternion.w * quaternion.w
         )
         field_names = [field.name for field in points_msg.fields]
-        plane_field_names = [field.name for field in planes_msg.fields]
-        required_plane_fields = {
-            "x", "y", "z", "normal_x", "normal_y", "normal_z",
-            "center_x", "center_y", "center_z", "plane_d", "confidence",
-            "radius", "eigen_min", "eigen_mid", "eigen_max", "plane_id",
-        }
         checks = {
             "image_encoding_bgr8": image_msg.encoding.lower() == "bgr8",
             "depth_encoding_32fc1": depth_msg.encoding.lower() == "32fc1",
@@ -82,8 +72,6 @@ def main():
             "cloud_has_points": points_msg.width * points_msg.height > 0,
             "cloud_has_xyz": all(name in field_names for name in ("x", "y", "z")),
             "cloud_has_color": "rgb" in field_names or all(name in field_names for name in ("r", "g", "b")),
-            "plane_cloud_has_samples": planes_msg.width * planes_msg.height > 0,
-            "plane_cloud_schema_complete": required_plane_fields.issubset(plane_field_names),
             "pose_quaternion_normalized": abs(quaternion_norm - 1.0) <= 1e-3,
         }
         payload = {
@@ -111,11 +99,6 @@ def main():
                 "frame_id": points_msg.header.frame_id,
                 "count": points_msg.width * points_msg.height,
                 "fields": field_names,
-            },
-            "planes": {
-                "frame_id": planes_msg.header.frame_id,
-                "count": planes_msg.width * planes_msg.height,
-                "fields": plane_field_names,
             },
             "timestamps": stamps,
             "max_timestamp_delta_s": max(stamps) - min(stamps),

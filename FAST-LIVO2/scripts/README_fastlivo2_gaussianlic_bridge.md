@@ -5,8 +5,7 @@ There are now two integration paths:
 - Recommended live path: run
   `mapping_r3live_hku_backend_contract.launch`. FAST-LIVO2 directly publishes
   rectified `bgr8` images, metric `32FC1` depth, camera `T_wc`, and world
-  XYZRGB points plus uncertainty-weighted voxel-plane samples under one pinhole
-  camera model and one timestamp.
+  XYZRGB points under one pinhole camera model and one timestamp.
 - Offline compatibility path: use the packet replay bridge described below.
 
 The offline bridge replaces the `Coco-LIC` 3DGS publisher path by replaying:
@@ -14,21 +13,12 @@ The offline bridge replaces the `Coco-LIC` 3DGS publisher path by replaying:
 - the original rosbag for image and LiDAR measurements
 - the exported `FAST-LIVO2` frontend packet `Log/3dgs_frontend_packet.jsonl`
 
-and publishing the legacy four topics that `Gaussian-LIC` consumes for
-appearance/depth-only runs:
+and publishing the four topics that `Gaussian-LIC` already subscribes to:
 
 - `/image_for_gs`
 - `/depth_for_gs`
 - `/pose_for_gs`
 - `/points_for_gs`
-
-The live path additionally publishes `/planes_for_gs`. C/D/E/F geometry-loss
-runs require this topic; the legacy packet replay path does not reconstruct it.
-
-`/planes_for_gs` is a `sensor_msgs/PointCloud2` whose records are current-view
-LiDAR-to-voxel-plane associations. Fields are observation point `xyz`, world
-normal `normal_xyz`, plane center `center_xyz`, `plane_d`, confidence, radius,
-three covariance eigenvalues, and `plane_id`.
 
 ## What it does
 

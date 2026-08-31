@@ -97,22 +97,14 @@ rotation_lr: 0.001
 lambda_dssim: 0.2
 optimize_depth: false
 lambda_depth: 0.0
-# A-F geometry-loss ablations. C/D/E/F consume synchronized FAST-LIVO2 planes.
+# A-F geometry-loss ablations. All geometry terms are disabled in the frozen A baseline.
+# C/D/E/F use normals derived from metric reference/rendered depth with edge masking.
 optimize_normal: false
 lambda_normal: 0.0
 optimize_point_plane: false
 lambda_point_plane: 0.0
 geometry_depth_discontinuity_ratio: 0.05
 point_plane_charbonnier_eps: 0.001
-# Reject occlusion-boundary and foreground/background plane associations.
-point_plane_depth_gate_ratio: 0.10
-point_plane_depth_gate_min: 0.20
-frontend_plane_supervision: false
-frontend_plane_topic: "/planes_for_gs"
-frontend_plane_sync_tolerance_sec: 0.01
-frontend_plane_splat_radius: 2
-frontend_plane_min_confidence: 0.2
-frontend_plane_fallback_to_depth: false
 iteration_decay: false
 dynamic_appearance_weight: true
 dynamic_geometry_capacity: true

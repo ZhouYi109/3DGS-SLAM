@@ -6,27 +6,20 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 runner="${script_dir}/run_p1_budget_from_bag.sh"
 gaussian_root="${GAUSSIAN_ROOT:-/root/autodl-tmp/catkin_gaussian/src/Gaussian-LIC}"
 config="${gaussian_root}/config/r3live_p1.yaml"
-bag="${1:-/autodl-fs/data/remote_code_frozen/frozen_fast_backend_contract_planes_003.bag}"
+bag="${1:-/autodl-fs/data/remote_code_frozen/frozen_fast_backend_contract_002.bag}"
 seed="${GEOMETRY_SEED:-20260725}"
 result_root="${GEOMETRY_RESULT_ROOT:-/root/autodl-tmp/experiments/geometry_loss_matrix_20260828}"
 log_root="${GEOMETRY_LOG_ROOT:-/root/autodl-tmp/runtime_logs/geometry_loss_matrix_20260828}"
 save_images="${GEOMETRY_SAVE_IMAGES:-true}"
-groups="${GEOMETRY_GROUPS:-A B C D E F}"
 
 lambda_depth="${GEOMETRY_LAMBDA_DEPTH:-0.05}"
 lambda_normal="${GEOMETRY_LAMBDA_NORMAL:-0.05}"
 lambda_point_plane="${GEOMETRY_LAMBDA_POINT_PLANE:-0.5}"
 edge_ratio="${GEOMETRY_DEPTH_DISCONTINUITY_RATIO:-0.05}"
 point_plane_eps="${GEOMETRY_POINT_PLANE_EPS:-0.001}"
-point_plane_depth_gate_ratio="${GEOMETRY_POINT_PLANE_DEPTH_GATE_RATIO:-0.10}"
-point_plane_depth_gate_min="${GEOMETRY_POINT_PLANE_DEPTH_GATE_MIN:-0.20}"
 
 if [ ! -f "${runner}" ] || [ ! -f "${config}" ] || [ ! -f "${bag}" ]; then
     echo "Missing runner, config, or frozen bag." >&2
-    exit 2
-fi
-if ! grep -q 'topic: /planes_for_gs' <<<"$(rosbag info --yaml "${bag}")"; then
-    echo "Geometry C-F require a six-topic bag containing /planes_for_gs: ${bag}" >&2
     exit 2
 fi
 mkdir -p "${result_root}"
@@ -45,16 +38,12 @@ run_group()
     local depth_enabled="$2"
     local normal_enabled="$3"
     local plane_enabled="$4"
-    local frontend_planes="false"
     local depth_weight="0.0"
     local normal_weight="0.0"
     local plane_weight="0.0"
     [ "${depth_enabled}" = "true" ] && depth_weight="${lambda_depth}"
     [ "${normal_enabled}" = "true" ] && normal_weight="${lambda_normal}"
     [ "${plane_enabled}" = "true" ] && plane_weight="${lambda_point_plane}"
-    if [ "${normal_enabled}" = "true" ] || [ "${plane_enabled}" = "true" ]; then
-        frontend_planes="true"
-    fi
     local run_id="geometry_${group}_$(date +%Y%m%d_%H%M%S)"
     cp "${config_backup}" "${config}"
     if [ "${group}" = "F" ]; then
@@ -75,24 +64,12 @@ run_group()
     GEOMETRY_LAMBDA_POINT_PLANE="${plane_weight}" \
     GEOMETRY_DEPTH_DISCONTINUITY_RATIO="${edge_ratio}" \
     GEOMETRY_POINT_PLANE_EPS="${point_plane_eps}" \
-    GEOMETRY_POINT_PLANE_DEPTH_GATE_RATIO="${point_plane_depth_gate_ratio}" \
-    GEOMETRY_POINT_PLANE_DEPTH_GATE_MIN="${point_plane_depth_gate_min}" \
-    FRONTEND_PLANE_SUPERVISION="${frontend_planes}" \
-    FRONTEND_PLANE_SPLAT_RADIUS="${FRONTEND_PLANE_SPLAT_RADIUS:-2}" \
-    FRONTEND_PLANE_MIN_CONFIDENCE="${FRONTEND_PLANE_MIN_CONFIDENCE:-0.2}" \
-    FRONTEND_PLANE_FALLBACK_TO_DEPTH="false" \
         bash "${runner}" "${run_id}" full "${bag}" "${seed}"
 }
 
-for group in ${groups}; do
-    case "${group}" in
-        A) run_group A false false false ;;
-        B) run_group B true  false false ;;
-        C) run_group C false true  false ;;
-        D) run_group D false false true ;;
-        E) run_group E true  true  true ;;
-        F) run_group F true  true  true ;;
-        G) run_group G false true  true ;;
-        *) echo "Unknown geometry group: ${group}" >&2; exit 2 ;;
-    esac
-done
+run_group A false false false
+run_group B true  false false
+run_group C false true  false
+run_group D false false true
+run_group E true  true  true
+run_group F true  true  true

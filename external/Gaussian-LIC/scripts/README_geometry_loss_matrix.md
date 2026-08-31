@@ -1,6 +1,6 @@
 # Geometry Loss A-F Matrix
 
-This experiment keeps the immutable FAST-LIVO2 six-topic bag, seed, P1 Full=20
+This experiment keeps the immutable FAST-LIVO2 five-topic bag, seed, P1 Full=20
 budget, appearance weighting, and geometry-capacity policy fixed. It changes only
 the geometry loss, except group F which additionally enables the fixed Top-256
 reliable-densification policy.
@@ -13,15 +13,11 @@ reliable-densification policy.
 | D | yes | no | no | yes | no |
 | E | yes | yes | yes | yes | no |
 | F | yes | yes | yes | yes | full |
-| G (diagnostic) | yes | no | yes | yes | no |
 
-For C/D/E/F, the reference plane comes from FAST-LIVO2's uncertainty-aware voxel
-map through `/planes_for_gs`. Each message is synchronized with image, depth, pose,
-points, and adaptive weights. Gaussian-LIC transforms world planes to the camera,
-projects their associated current-scan observations, resolves visibility with a
-z-buffer, and splats a small disk to form confidence-weighted supervision maps.
-The rendered normal is differentiated from rendered metric depth; reference normals
-do not require a dense LiDAR depth neighborhood.
+The first implementation derives reference and rendered normals from metric depth.
+Both depth maps are back-projected with the camera intrinsics. A pixel is valid only
+when its center and four direct neighbors contain finite positive depth and do not
+cross the configured relative-depth discontinuity threshold.
 
 The sign-invariant normal loss is
 
@@ -32,27 +28,15 @@ L_normal = mean(1 - abs(dot(n_rendered, n_reference))).
 The point-to-plane residual and robust loss are
 
 ```text
-r_plane = dot(n_frontend, P_rendered - plane_center_frontend)
+r_plane = dot(n_reference, P_rendered - P_reference)
 L_plane = mean(sqrt(r_plane^2 + epsilon^2) - epsilon).
 ```
 
-Unlike the normal loss, the point-to-plane term requires a depth-consistent
-correspondence. A projected frontend plane is accepted only when
-
-```text
-abs(z_rendered - z_frontend) <= max(depth_gate_min,
-                                    depth_gate_ratio * abs(z_frontend)).
-```
-
-This gate rejects same-pixel foreground/background and occlusion-boundary
-associations. Defaults are `depth_gate_ratio=0.10` and
-`depth_gate_min=0.20 m`; setting both to a very large value reproduces the
-ungated behavior for a controlled diagnostic only.
-
-The frozen input must contain all six topics, including `/planes_for_gs`. Create it
-with `scripts/record_fast_backend_contract_r3live.sh` after rebuilding FAST-LIVO2.
-The runner deliberately disables depth-derived fallback, so zero frontend-plane
-coverage is visible in telemetry instead of silently changing the experiment.
+This is a compatibility-first implementation. It does not yet consume the
+FAST-LIVO2 voxel-plane normal, and it must not be described as such. Before a full
+matrix run, use a short smoke run to verify that the sparse metric-depth contract
+provides enough valid normal neighborhoods. The next upgrade is to transport
+FAST-LIVO2 plane normals and planarity confidence explicitly.
 
 Run from the monorepo root on the validated remote layout:
 
@@ -63,18 +47,11 @@ export GEOMETRY_SEED=20260725
 export GEOMETRY_LAMBDA_DEPTH=0.05
 export GEOMETRY_LAMBDA_NORMAL=0.05
 export GEOMETRY_LAMBDA_POINT_PLANE=0.5
-export GEOMETRY_POINT_PLANE_DEPTH_GATE_RATIO=0.10
-export GEOMETRY_POINT_PLANE_DEPTH_GATE_MIN=0.20
 
 bash scripts/run_geometry_loss_matrix.sh \
-  /autodl-fs/data/remote_code_frozen/frozen_fast_backend_contract_planes_003.bag
+  /autodl-fs/data/remote_code_frozen/frozen_fast_backend_contract_002.bag
 ```
 
-Use `GEOMETRY_GROUPS="C D"` to run selected groups without rerunning the whole
-matrix. Group G is an optional normal-plus-point-to-plane diagnostic and is not
-part of the original A-F claim.
-
 The runner restores `config/r3live_p1.yaml` on exit. Each run stores the resolved
-configuration and geometry flags/weights in `wall_times.txt`. `p1_telemetry.csv`
-also records plane sample count, valid pixel count, and valid image ratio. Use
+configuration and geometry flags/weights in `wall_times.txt`. Use
 `scripts/summarize_p1_budget_runs.py` to include those fields in a CSV summary.
