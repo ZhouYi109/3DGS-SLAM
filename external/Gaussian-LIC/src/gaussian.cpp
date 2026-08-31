@@ -200,7 +200,9 @@ std::pair<torch::Tensor, torch::Tensor> frontendPlaneGeometryLosses(
     const torch::Tensor& reference_confidence,
     float fx, float fy, float cx, float cy,
     float discontinuity_ratio,
-    float charbonnier_eps)
+    float charbonnier_eps,
+    float depth_gate_ratio,
+    float depth_gate_min)
 {
     auto rendered = depthToSurface(
         rendered_depth, fx, fy, cx, cy, discontinuity_ratio);
@@ -214,17 +216,31 @@ std::pair<torch::Tensor, torch::Tensor> frontendPlaneGeometryLosses(
     auto plane_valid = torch::isfinite(normals).all(2)
         & torch::isfinite(centers).all(2)
         & torch::isfinite(confidence) & (confidence > 0.0f);
-    auto valid = rendered.valid & plane_valid;
-    auto weight = torch::where(valid, confidence, torch::zeros_like(confidence));
-    auto denominator = weight.sum().clamp_min(1.0f);
+    auto normal_valid = rendered.valid & plane_valid;
+    auto normal_weight = torch::where(
+        normal_valid, confidence, torch::zeros_like(confidence));
+    auto normal_denominator = normal_weight.sum().clamp_min(1.0f);
 
     normals = normals / normals.norm(2, 2, true).clamp_min(1e-6f);
     auto cosine = (rendered.normals * normals).sum(2).abs().clamp(0.0f, 1.0f);
-    auto normal_loss = ((1.0f - cosine) * weight).sum() / denominator;
+    auto normal_loss = ((1.0f - cosine) * normal_weight).sum() / normal_denominator;
+    // A projected LiDAR plane is not necessarily the surface rendered at the
+    // same pixel (occlusion boundaries and foreground/background overlap).
+    // Apply point-to-plane supervision only to depth-consistent associations.
+    auto reference_z = centers.index({Slice(), Slice(), 2}).abs();
+    auto rendered_z = rendered.points.index({Slice(), Slice(), 2});
+    auto gate = torch::maximum(
+        torch::full_like(reference_z, std::max(0.0f, depth_gate_min)),
+        reference_z * std::max(0.0f, depth_gate_ratio));
+    auto point_plane_valid = normal_valid & ((rendered_z - reference_z).abs() <= gate);
+    auto point_plane_weight = torch::where(
+        point_plane_valid, confidence, torch::zeros_like(confidence));
+    auto point_plane_denominator = point_plane_weight.sum().clamp_min(1.0f);
     auto plane_residual = ((rendered.points - centers) * normals).sum(2);
     const float epsilon = std::max(1e-6f, charbonnier_eps);
     auto robust_plane = torch::sqrt(plane_residual.square() + epsilon * epsilon) - epsilon;
-    auto point_plane_loss = (robust_plane * weight).sum() / denominator;
+    auto point_plane_loss =
+        (robust_plane * point_plane_weight).sum() / point_plane_denominator;
     return {normal_loss, point_plane_loss};
 }
 
@@ -1723,6 +1739,8 @@ GaussianModel::GaussianModel(const Params& prm)
     frontend_plane_fallback_to_depth_ = prm.frontend_plane_fallback_to_depth;
     geometry_depth_discontinuity_ratio_ = prm.geometry_depth_discontinuity_ratio;
     point_plane_charbonnier_eps_ = prm.point_plane_charbonnier_eps;
+    point_plane_depth_gate_ratio_ = prm.point_plane_depth_gate_ratio;
+    point_plane_depth_gate_min_ = prm.point_plane_depth_gate_min;
     iteration_decay_ = prm.iteration_decay;
     dynamic_appearance_weight_ = prm.dynamic_appearance_weight;
     dynamic_geometry_capacity_ = prm.dynamic_geometry_capacity;
@@ -4716,7 +4734,9 @@ double optimize(
                     viewpoint_cam->fx_, viewpoint_cam->fy_,
                     viewpoint_cam->cx_, viewpoint_cam->cy_,
                     static_cast<float>(pc->geometry_depth_discontinuity_ratio_),
-                    static_cast<float>(pc->point_plane_charbonnier_eps_));
+                    static_cast<float>(pc->point_plane_charbonnier_eps_),
+                    static_cast<float>(pc->point_plane_depth_gate_ratio_),
+                    static_cast<float>(pc->point_plane_depth_gate_min_));
             }
             else if (!pc->frontend_plane_supervision_ ||
                      pc->frontend_plane_fallback_to_depth_)

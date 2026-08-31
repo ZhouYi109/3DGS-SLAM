@@ -312,6 +312,8 @@ public:
     bool frontend_plane_fallback_to_depth_;
     double geometry_depth_discontinuity_ratio_;
     double point_plane_charbonnier_eps_;
+    double point_plane_depth_gate_ratio_;
+    double point_plane_depth_gate_min_;
     bool iteration_decay_;
     bool dynamic_appearance_weight_;
     bool dynamic_geometry_capacity_;

@@ -104,6 +104,9 @@ optimize_point_plane: false
 lambda_point_plane: 0.0
 geometry_depth_discontinuity_ratio: 0.05
 point_plane_charbonnier_eps: 0.001
+# Reject occlusion-boundary and foreground/background plane associations.
+point_plane_depth_gate_ratio: 0.10
+point_plane_depth_gate_min: 0.20
 frontend_plane_supervision: false
 frontend_plane_topic: "/planes_for_gs"
 frontend_plane_sync_tolerance_sec: 0.01

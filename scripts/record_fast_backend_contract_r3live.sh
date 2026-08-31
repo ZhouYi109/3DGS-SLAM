@@ -15,7 +15,10 @@ log_dir="/root/autodl-tmp/runtime_logs/paper_retest_20260725/${run_id}"
 metadata_dir="${output_bag%.bag}_metadata"
 record_bag="/dev/shm/${run_id}.bag"
 
-mkdir -p "$(dirname "${output_bag}")" "${log_dir}" "${metadata_dir}"
+if ! mkdir -p "$(dirname "${output_bag}")" "${log_dir}" "${metadata_dir}"; then
+    echo "Cannot create output, log, or metadata directory." >&2
+    exit 2
+fi
 if [ -e "${output_bag}" ] || [ -e "${record_bag}" ] || [ -e "${record_bag}.active" ]; then
     echo "Frozen bag already exists: ${output_bag}" >&2
     exit 2

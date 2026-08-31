@@ -11,12 +11,15 @@ seed="${GEOMETRY_SEED:-20260725}"
 result_root="${GEOMETRY_RESULT_ROOT:-/root/autodl-tmp/experiments/geometry_loss_matrix_20260828}"
 log_root="${GEOMETRY_LOG_ROOT:-/root/autodl-tmp/runtime_logs/geometry_loss_matrix_20260828}"
 save_images="${GEOMETRY_SAVE_IMAGES:-true}"
+groups="${GEOMETRY_GROUPS:-A B C D E F}"
 
 lambda_depth="${GEOMETRY_LAMBDA_DEPTH:-0.05}"
 lambda_normal="${GEOMETRY_LAMBDA_NORMAL:-0.05}"
 lambda_point_plane="${GEOMETRY_LAMBDA_POINT_PLANE:-0.5}"
 edge_ratio="${GEOMETRY_DEPTH_DISCONTINUITY_RATIO:-0.05}"
 point_plane_eps="${GEOMETRY_POINT_PLANE_EPS:-0.001}"
+point_plane_depth_gate_ratio="${GEOMETRY_POINT_PLANE_DEPTH_GATE_RATIO:-0.10}"
+point_plane_depth_gate_min="${GEOMETRY_POINT_PLANE_DEPTH_GATE_MIN:-0.20}"
 
 if [ ! -f "${runner}" ] || [ ! -f "${config}" ] || [ ! -f "${bag}" ]; then
     echo "Missing runner, config, or frozen bag." >&2
@@ -72,6 +75,8 @@ run_group()
     GEOMETRY_LAMBDA_POINT_PLANE="${plane_weight}" \
     GEOMETRY_DEPTH_DISCONTINUITY_RATIO="${edge_ratio}" \
     GEOMETRY_POINT_PLANE_EPS="${point_plane_eps}" \
+    GEOMETRY_POINT_PLANE_DEPTH_GATE_RATIO="${point_plane_depth_gate_ratio}" \
+    GEOMETRY_POINT_PLANE_DEPTH_GATE_MIN="${point_plane_depth_gate_min}" \
     FRONTEND_PLANE_SUPERVISION="${frontend_planes}" \
     FRONTEND_PLANE_SPLAT_RADIUS="${FRONTEND_PLANE_SPLAT_RADIUS:-2}" \
     FRONTEND_PLANE_MIN_CONFIDENCE="${FRONTEND_PLANE_MIN_CONFIDENCE:-0.2}" \
@@ -79,9 +84,15 @@ run_group()
         bash "${runner}" "${run_id}" full "${bag}" "${seed}"
 }
 
-run_group A false false false
-run_group B true  false false
-run_group C false true  false
-run_group D false false true
-run_group E true  true  true
-run_group F true  true  true
+for group in ${groups}; do
+    case "${group}" in
+        A) run_group A false false false ;;
+        B) run_group B true  false false ;;
+        C) run_group C false true  false ;;
+        D) run_group D false false true ;;
+        E) run_group E true  true  true ;;
+        F) run_group F true  true  true ;;
+        G) run_group G false true  true ;;
+        *) echo "Unknown geometry group: ${group}" >&2; exit 2 ;;
+    esac
+done

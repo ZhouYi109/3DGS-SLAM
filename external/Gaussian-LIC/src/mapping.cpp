@@ -538,6 +538,8 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         prm.lambda_point_plane < 0.0 ||
         prm.geometry_depth_discontinuity_ratio < 0.0 ||
         prm.point_plane_charbonnier_eps <= 0.0 ||
+        prm.point_plane_depth_gate_ratio < 0.0 ||
+        prm.point_plane_depth_gate_min < 0.0 ||
         prm.frontend_plane_sync_tolerance_sec < 0.0 ||
         prm.frontend_plane_splat_radius < 0 ||
         prm.frontend_plane_min_confidence < 0.0 ||
@@ -578,6 +580,10 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
               << " (lambda=" << prm.lambda_point_plane << ")"
               << ", edge_ratio=" << prm.geometry_depth_discontinuity_ratio
               << ", charbonnier_eps=" << prm.point_plane_charbonnier_eps
+              << ", point_plane_depth_gate_ratio="
+              << prm.point_plane_depth_gate_ratio
+              << ", point_plane_depth_gate_min="
+              << prm.point_plane_depth_gate_min
               << ", frontend_planes="
               << (prm.frontend_plane_supervision ? "true" : "false")
               << ", plane_splat_radius=" << prm.frontend_plane_splat_radius
@@ -1501,6 +1507,18 @@ int main(int argc, char** argv)
         point_plane_charbonnier_eps,
         point_plane_charbonnier_eps);
     config_node["point_plane_charbonnier_eps"] = point_plane_charbonnier_eps;
+    double point_plane_depth_gate_ratio = config_node["point_plane_depth_gate_ratio"]
+        ? config_node["point_plane_depth_gate_ratio"].as<double>() : 0.10;
+    nh.param<double>(
+        "point_plane_depth_gate_ratio", point_plane_depth_gate_ratio,
+        point_plane_depth_gate_ratio);
+    config_node["point_plane_depth_gate_ratio"] = point_plane_depth_gate_ratio;
+    double point_plane_depth_gate_min = config_node["point_plane_depth_gate_min"]
+        ? config_node["point_plane_depth_gate_min"].as<double>() : 0.20;
+    nh.param<double>(
+        "point_plane_depth_gate_min", point_plane_depth_gate_min,
+        point_plane_depth_gate_min);
+    config_node["point_plane_depth_gate_min"] = point_plane_depth_gate_min;
     int random_seed = 20260725;
     nh.param<int>("random_seed", random_seed, 20260725);
     config_node["random_seed"] = random_seed;

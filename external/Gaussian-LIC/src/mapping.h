@@ -172,6 +172,10 @@ public:
             ? node["geometry_depth_discontinuity_ratio"].as<double>() : 0.05;
         point_plane_charbonnier_eps = node["point_plane_charbonnier_eps"]
             ? node["point_plane_charbonnier_eps"].as<double>() : 0.001;
+        point_plane_depth_gate_ratio = node["point_plane_depth_gate_ratio"]
+            ? node["point_plane_depth_gate_ratio"].as<double>() : 0.10;
+        point_plane_depth_gate_min = node["point_plane_depth_gate_min"]
+            ? node["point_plane_depth_gate_min"].as<double>() : 0.20;
         frontend_plane_supervision = node["frontend_plane_supervision"]
             ? node["frontend_plane_supervision"].as<bool>() : false;
         frontend_plane_topic = node["frontend_plane_topic"]
@@ -306,6 +310,8 @@ public:
     double lambda_point_plane;
     double geometry_depth_discontinuity_ratio;
     double point_plane_charbonnier_eps;
+    double point_plane_depth_gate_ratio;
+    double point_plane_depth_gate_min;
     bool frontend_plane_supervision;
     std::string frontend_plane_topic;
     double frontend_plane_sync_tolerance_sec;

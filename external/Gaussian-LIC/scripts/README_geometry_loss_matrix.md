@@ -13,6 +13,7 @@ reliable-densification policy.
 | D | yes | no | no | yes | no |
 | E | yes | yes | yes | yes | no |
 | F | yes | yes | yes | yes | full |
+| G (diagnostic) | yes | no | yes | yes | no |
 
 For C/D/E/F, the reference plane comes from FAST-LIVO2's uncertainty-aware voxel
 map through `/planes_for_gs`. Each message is synchronized with image, depth, pose,
@@ -35,6 +36,19 @@ r_plane = dot(n_frontend, P_rendered - plane_center_frontend)
 L_plane = mean(sqrt(r_plane^2 + epsilon^2) - epsilon).
 ```
 
+Unlike the normal loss, the point-to-plane term requires a depth-consistent
+correspondence. A projected frontend plane is accepted only when
+
+```text
+abs(z_rendered - z_frontend) <= max(depth_gate_min,
+                                    depth_gate_ratio * abs(z_frontend)).
+```
+
+This gate rejects same-pixel foreground/background and occlusion-boundary
+associations. Defaults are `depth_gate_ratio=0.10` and
+`depth_gate_min=0.20 m`; setting both to a very large value reproduces the
+ungated behavior for a controlled diagnostic only.
+
 The frozen input must contain all six topics, including `/planes_for_gs`. Create it
 with `scripts/record_fast_backend_contract_r3live.sh` after rebuilding FAST-LIVO2.
 The runner deliberately disables depth-derived fallback, so zero frontend-plane
@@ -49,10 +63,16 @@ export GEOMETRY_SEED=20260725
 export GEOMETRY_LAMBDA_DEPTH=0.05
 export GEOMETRY_LAMBDA_NORMAL=0.05
 export GEOMETRY_LAMBDA_POINT_PLANE=0.5
+export GEOMETRY_POINT_PLANE_DEPTH_GATE_RATIO=0.10
+export GEOMETRY_POINT_PLANE_DEPTH_GATE_MIN=0.20
 
 bash scripts/run_geometry_loss_matrix.sh \
   /autodl-fs/data/remote_code_frozen/frozen_fast_backend_contract_planes_003.bag
 ```
+
+Use `GEOMETRY_GROUPS="C D"` to run selected groups without rerunning the whole
+matrix. Group G is an optional normal-plus-point-to-plane diagnostic and is not
+part of the original A-F claim.
 
 The runner restores `config/r3live_p1.yaml` on exit. Each run stores the resolved
 configuration and geometry flags/weights in `wall_times.txt`. `p1_telemetry.csv`
