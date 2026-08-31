@@ -449,6 +449,7 @@ ExtensionStats extend(
     int candidate_dedup_pixel_stride = 4,
     float candidate_dedup_max_alpha = 0.60f,
     float candidate_dedup_depth_tolerance = 0.20f,
+    bool detail_map_enabled = false,
     bool detail_spawn_enabled = false,
     int detail_spawn_top_k = 512,
     int detail_spawn_pixel_stride = 4,

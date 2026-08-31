@@ -4028,6 +4028,7 @@ ExtensionStats extend(
     int candidate_dedup_pixel_stride,
     float candidate_dedup_max_alpha,
     float candidate_dedup_depth_tolerance,
+    bool detail_map_enabled,
     bool detail_spawn_enabled,
     int detail_spawn_top_k,
     int detail_spawn_pixel_stride,
@@ -4048,7 +4049,7 @@ ExtensionStats extend(
     auto rendered_alpha = 1 - std::get<2>(render_pkg).squeeze(0);
     auto rendered_depth = std::get<1>(render_pkg).squeeze();
     torch::Tensor missing_detail;
-    if (detail_spawn_enabled)
+    if (detail_map_enabled)
     {
         missing_detail = buildMissingDetailMap(
             viewpoint_cam->original_image_, std::get<0>(render_pkg).clamp(0.0f, 1.0f),

@@ -559,7 +559,12 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         throw std::invalid_argument(
             "Invalid geometry-loss, frontend-plane, or detail-densification configuration");
     }
-    std::cout << "[Gaussian-LIC Detail Densification] spawn="
+    const bool detail_map_enabled = prm.detail_spawn_enabled ||
+        (prm.reliable_densification_enabled &&
+         prm.reliable_densification_detail_weight > 0.0);
+    std::cout << "[Gaussian-LIC Detail Densification] map="
+              << (detail_map_enabled ? "true" : "false")
+              << ", spawn="
               << (prm.detail_spawn_enabled ? "true" : "false")
               << ", spawn_top_k=" << prm.detail_spawn_top_k
               << ", pixel_stride=" << prm.detail_spawn_pixel_stride
@@ -801,6 +806,9 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
                 prm.p1_candidate_dedup_pixel_stride,
                 static_cast<float>(prm.p1_candidate_dedup_max_alpha),
                 static_cast<float>(prm.p1_candidate_dedup_depth_tolerance),
+                prm.detail_spawn_enabled ||
+                    (prm.reliable_densification_enabled &&
+                     prm.reliable_densification_detail_weight > 0.0),
                 prm.detail_spawn_enabled,
                 prm.detail_spawn_top_k,
                 prm.detail_spawn_pixel_stride,

@@ -262,3 +262,8 @@ echo "GEOMETRY_POINT_PLANE=${geometry_optimize_point_plane}:${geometry_lambda_po
 echo "FRONTEND_PLANES=${frontend_plane_supervision}:radius=${frontend_plane_splat_radius}:confidence=${frontend_plane_min_confidence}"
 echo "DETAIL_SPAWN=${detail_spawn_enabled}:top_k=${detail_spawn_top_k}:stride=${detail_spawn_pixel_stride}:threshold=${detail_spawn_threshold}:detail_power=${detail_spawn_detail_power}:alpha_power=${detail_spawn_alpha_power}"
 echo "DETAIL_SPLIT=weight=${reliable_detail_weight}:floor=${reliable_detail_floor}"
+
+if [ "${bag_status}" -ne 0 ] || [ "${gaussian_status}" -ne 0 ] || [ "${done_seen}" != "true" ]; then
+    exit 1
+fi
+exit 0
