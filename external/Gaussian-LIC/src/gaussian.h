@@ -222,13 +222,8 @@ public:
 
     void trainingSetup();
     void observeDensificationEvidence(const torch::Tensor& visible, const torch::Tensor& screenspace_points);
-    void setLatestMissingDetailMap(
-        const torch::Tensor& missing_detail,
-        const std::shared_ptr<Camera>& camera);
     int64_t densifyReliableTopK(const std::string& mode, int top_k, int min_views,
-                                int n0, float variance_tau, float scale_shrink,
-                                float detail_weight = 0.0f,
-                                float detail_floor = 0.05f);
+                                int n0, float variance_tau, float scale_shrink);
 
     void densificationPostfix(
         torch::Tensor& new_xyz,
@@ -395,13 +390,6 @@ public:
     torch::Tensor densify_residual_mean_;
     torch::Tensor densify_residual_m2_;
     torch::Tensor densify_visible_count_;
-    torch::Tensor latest_missing_detail_;
-    Eigen::Matrix3d latest_detail_R_cw_ = Eigen::Matrix3d::Identity();
-    Eigen::Vector3d latest_detail_t_cw_ = Eigen::Vector3d::Zero();
-    float latest_detail_fx_ = 0.0f;
-    float latest_detail_fy_ = 0.0f;
-    float latest_detail_cx_ = 0.0f;
-    float latest_detail_cy_ = 0.0f;
 
     std::chrono::steady_clock::time_point t_start_;
     std::chrono::steady_clock::time_point t_end_;
@@ -417,32 +405,13 @@ public:
 
 // When enabled, extension admits only locally visible, non-redundant candidates
 // from the current keyframe. Existing map rows are never scanned or pruned here.
-struct ExtensionStats
-{
-    int64_t visible_candidates = 0;
-    int64_t detail_candidates = 0;
-    int64_t inserted = 0;
-    float detail_score_mean = 0.0f;
-    float detail_score_max = 0.0f;
-};
-
-ExtensionStats extend(
+void extend(
     const std::shared_ptr<Dataset>& dataset,
     std::shared_ptr<GaussianModel>& pc,
     bool candidate_dedup_enabled = false,
     int candidate_dedup_pixel_stride = 4,
     float candidate_dedup_max_alpha = 0.60f,
-    float candidate_dedup_depth_tolerance = 0.20f,
-    bool detail_map_enabled = false,
-    bool detail_spawn_enabled = false,
-    int detail_spawn_top_k = 512,
-    int detail_spawn_pixel_stride = 4,
-    float detail_spawn_sigma_small = 0.5f,
-    float detail_spawn_sigma_large = 1.5f,
-    float detail_spawn_threshold = 0.10f,
-    float detail_spawn_alpha_power = 1.0f,
-    float detail_spawn_detail_power = 1.0f,
-    float detail_spawn_min_geometry_weight = 0.20f);
+    float candidate_dedup_depth_tolerance = 0.20f);
 double optimize(
     const std::shared_ptr<Dataset>& dataset,
     std::shared_ptr<GaussianModel>& pc,

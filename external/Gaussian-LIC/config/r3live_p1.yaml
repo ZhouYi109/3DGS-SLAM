@@ -50,20 +50,6 @@ p1_candidate_dedup_pixel_stride: 4
 p1_candidate_dedup_max_alpha: 0.60
 p1_candidate_dedup_depth_tolerance: 0.20
 
-# Phase-1 dual-channel densification. Pixel-level spawn admits only LiDAR
-# candidates that fall on normalized DoG(real)-DoG(render) detail deficits,
-# with alpha-hole, geometry-confidence, semantic-static and image-cell gates.
-# Disabled by default so historical P1/A-F baselines remain reproducible.
-detail_spawn_enabled: false
-detail_spawn_top_k: 512
-detail_spawn_pixel_stride: 4
-detail_spawn_sigma_small: 0.5
-detail_spawn_sigma_large: 1.5
-detail_spawn_threshold: 0.10
-detail_spawn_alpha_power: 1.0
-detail_spawn_detail_power: 1.0
-detail_spawn_min_geometry_weight: 0.20
-
 # Observation-reliable densification. Keep disabled for all existing baselines.
 reliable_densification_enabled: false
 reliable_densification_mode: "full"  # gradient, residual, residual_count, full
@@ -74,11 +60,6 @@ reliable_densification_n0: 5
 reliable_densification_ema: 0.20
 reliable_densification_variance_tau: 0.05
 reliable_densification_scale_shrink: 1.6
-# When non-zero, projected current-view missing-detail evidence reweights the
-# existing Gaussian split score. The floor prevents one weak frame from
-# suppressing otherwise reliable multi-view evidence.
-reliable_densification_detail_weight: 0.0
-reliable_densification_detail_floor: 0.05
 evaluation_save_images: true
 
 sh_degree: 3
