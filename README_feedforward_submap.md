@@ -26,6 +26,13 @@ FAST-LIVO2 (LiDAR-IMU-camera pose)
 5. 将每个关键帧输出写为局部 Gaussian 子图，而非直接扩展一个自由全局高斯池。
 6. 建立图像地点检索 + LiDAR 几何验证的闭环边，进行 pose graph 优化，并刚体变换所属子图。
 
+## 预训练权重
+
+第一阶段仅依赖冻结的 `facebook/VGGT-1B`。运行
+`powershell -ExecutionPolicy Bypass -File scripts/download_vggt_weight.ps1`
+将官方固定 revision 的 `model.pt` 下载到 `models/VGGT-1B/`，以分段并行下载和 SHA-256
+校验保证可恢复性。该模型文件受 `.gitignore` 保护，不得提交。
+
 ## 最小验证
 
 - 前馈子图在相邻关键帧的 RGB、稀疏 LiDAR 深度和重投影误差；
