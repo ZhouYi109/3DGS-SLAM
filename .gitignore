@@ -39,6 +39,7 @@ external/Gaussian-LIC/result/
 # Datasets, model weights, and generated acceleration engines
 datasets/
 data/
+models/
 *.pt
 *.pth
 *.ckpt
