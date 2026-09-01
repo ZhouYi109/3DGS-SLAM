@@ -35,14 +35,14 @@ for ($index = 0; $index -lt $Connections; $index++) {
     Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
     $jobs += Start-Job -ArgumentList $Url, $start, $end, $part -ScriptBlock {
         param($jobUrl, $jobStart, $jobEnd, $jobPart)
-        & curl.exe -L --fail --retry 5 --retry-all-errors --range "${jobStart}-${jobEnd}" --output $jobPart $jobUrl
+        & curl.exe -L --fail --silent --show-error --retry 5 --retry-all-errors --range "${jobStart}-${jobEnd}" --output $jobPart $jobUrl
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 }
 if ($jobs.Count -gt 0) {
     $jobs | Wait-Job | Out-Null
     $failed = $jobs | Where-Object { $_.State -ne "Completed" }
-    $jobs | Receive-Job | Write-Output
+    $jobs | Receive-Job -ErrorAction Continue | Write-Output
     $jobs | Remove-Job
     if ($failed) { throw "One or more VGGT download segments failed." }
 }
